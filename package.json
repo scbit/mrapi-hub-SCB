@@ -1,0 +1,19 @@
+{
+  "name": "mrapi-hub",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MR API HUB - CRM + HUB + Bandeja multi-tenant para Cloud Run",
+  "main": "server.js",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && find src -name '*.js' -print0 | xargs -0 -n1 node --check"
+  },
+  "dependencies": {
+    "@google-cloud/storage": "^7.16.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.0.2",
+    "helmet": "^8.1.0"
+  }
+}

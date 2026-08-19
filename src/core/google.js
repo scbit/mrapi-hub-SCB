@@ -1,0 +1,10 @@
+"use strict";
+const admin = require("firebase-admin");
+const { getFirestore } = require("firebase-admin/firestore");
+const { Storage } = require("@google-cloud/storage");
+const config = require("./config");
+if (!admin.apps.length) admin.initializeApp();
+const crmDb = getFirestore(admin.app(), config.crmDb);
+const inboxDb = getFirestore(admin.app(), config.inboxDb);
+const storage = new Storage();
+module.exports = { admin, crmDb, inboxDb, storage };

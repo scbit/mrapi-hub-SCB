@@ -26,6 +26,40 @@ router.get("/meta",async(req,res)=>{
   }catch(e){res.status(500).json({ok:false,error:e.message});}
 });
 
+
+router.get("/views",async(req,res)=>{
+  try{
+    const snap=await crmDb.collection("users").doc(req.authUser.id).collection("crmViews").orderBy("updatedAt","desc").limit(30).get();
+    const items=snap.docs.map(d=>({id:d.id,...(d.data()||{}),createdAt:ts((d.data()||{}).createdAt),updatedAt:ts((d.data()||{}).updatedAt)}));
+    return res.json({ok:true,items,readsEstimate:snap.size});
+  }catch(e){return res.status(500).json({ok:false,error:e.message});}
+});
+router.post("/views",async(req,res)=>{
+  try{
+    const name=String(req.body?.name||"").trim().slice(0,80); if(!name)return res.status(400).json({ok:false,error:"Falta nombre de vista"});
+    const cfg=req.body?.config&&typeof req.body.config==="object"?req.body.config:{};
+    const clean={view:["kanban","list"].includes(cfg.view)?cfg.view:"kanban",stage:String(cfg.stage||""),owner:String(cfg.owner||"").toLowerCase(),dealType:String(cfg.dealType||""),stageOrder:Array.isArray(cfg.stageOrder)?cfg.stageOrder.filter(x=>PIPELINE_STAGES.includes(x)).slice(0,50):PIPELINE_STAGES,hiddenStages:Array.isArray(cfg.hiddenStages)?cfg.hiddenStages.filter(x=>PIPELINE_STAGES.includes(x)).slice(0,50):[],collapsedStages:Array.isArray(cfg.collapsedStages)?cfg.collapsedStages.filter(x=>PIPELINE_STAGES.includes(x)).slice(0,50):[],mobileStage:PIPELINE_STAGES.includes(cfg.mobileStage)?cfg.mobileStage:"Seguimiento"};
+    const ref=crmDb.collection("users").doc(req.authUser.id).collection("crmViews").doc();
+    const now=admin.firestore.FieldValue.serverTimestamp(); await ref.set({name,config:clean,createdAt:now,updatedAt:now});
+    return res.json({ok:true,item:{id:ref.id,name,config:clean},readsEstimate:0,writesEstimate:1});
+  }catch(e){return res.status(500).json({ok:false,error:e.message});}
+});
+router.delete("/views/:id",async(req,res)=>{
+  try{await crmDb.collection("users").doc(req.authUser.id).collection("crmViews").doc(req.params.id).delete();return res.json({ok:true,readsEstimate:0,writesEstimate:1});}
+  catch(e){return res.status(500).json({ok:false,error:e.message});}
+});
+router.post("/deals/bulk-stage",async(req,res)=>{
+  try{
+    const ids=Array.from(new Set((Array.isArray(req.body?.ids)?req.body.ids:[]).map(x=>String(x||"").trim()).filter(Boolean))).slice(0,100);
+    const stage=String(req.body?.stage||"").trim(); if(!ids.length)return res.status(400).json({ok:false,error:"No hay tratos seleccionados"}); if(!PIPELINE_STAGES.includes(stage))return res.status(400).json({ok:false,error:"Etapa inválida"});
+    const refs=ids.map(id=>crmDb.collection("deals").doc(id)); const docs=await crmDb.getAll(...refs); const allowed=[];
+    for(const d of docs){if(d.exists&&await canEditOwner(req.authUser,(d.data()||{}).owner))allowed.push(d.ref);}
+    if(!allowed.length)return res.status(403).json({ok:false,error:"Sin permiso sobre los tratos seleccionados"});
+    const batch=crmDb.batch(); const now=new Date(); allowed.forEach(ref=>batch.update(ref,{stage,updatedAt:now})); await batch.commit();
+    return res.json({ok:true,updated:allowed.length,readsEstimate:docs.length,writesEstimate:allowed.length});
+  }catch(e){return res.status(500).json({ok:false,error:e.message});}
+});
+
 router.get("/deals",async(req,res)=>{
   try{
     const limit=cleanLimit(req.query.limit,50), stage=String(req.query.stage||"").trim(), owner=String(req.query.owner||"").trim().toLowerCase(), dealType=String(req.query.dealType||"").trim(), cursor=dec(req.query.cursor);

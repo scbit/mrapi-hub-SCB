@@ -36,6 +36,15 @@ function summary(doc){
     lastDeliveryStatus: d.lastDeliveryStatus || "",
     sourceChannel: d.sourceChannel || "",
     leadPlatform: d.leadPlatform || d.leadAd?.platform || "",
+    referralCtwaClid: d.referralCtwaClid || "",
+    referralAdId: d.referralAdId || d.leadAd?.adId || "",
+    referralSourceType: d.referralSourceType || "",
+    referralHeadline: d.referralHeadline || d.leadAd?.headline || d.leadAd?.title || d.leadAd?.adName || "",
+    referralBody: d.referralBody || d.leadAd?.body || d.leadAd?.text || d.leadAd?.description || "",
+    referralImageUrl: d.referralImageUrl || d.leadAd?.imageUrl || "",
+    campaignName: d.campaignName || d.leadAd?.campaignName || "",
+    adsetName: d.adsetName || d.leadAd?.adsetName || "",
+    leadAd: d.leadAd && typeof d.leadAd === "object" ? d.leadAd : null,
     duplicateConversationIds: uniqueStrings(d.duplicateConversationIds || [])
   };
 }
@@ -56,7 +65,16 @@ function message(doc, conversationId){
     media: Array.isArray(d.media) ? d.media.map(m=>({
       url: m?.url || "", contentType: m?.contentType || m?.mimeType || "", filename: m?.filename || ""
     })) : [],
-    template: d.template || null
+    template: d.template || null,
+    referralCtwaClid: d.referralCtwaClid || d.payload?.referralCtwaClid || "",
+    referralAdId: d.referralAdId || d.payload?.referralAdId || d.leadAd?.adId || "",
+    referralSourceType: d.referralSourceType || d.payload?.referralSourceType || "",
+    referralHeadline: d.referralHeadline || d.payload?.referralHeadline || d.leadAd?.headline || "",
+    referralBody: d.referralBody || d.payload?.referralBody || d.leadAd?.body || "",
+    referralImageUrl: d.referralImageUrl || d.payload?.referralImageUrl || d.leadAd?.imageUrl || "",
+    campaignName: d.campaignName || d.leadAd?.campaignName || "",
+    adsetName: d.adsetName || d.leadAd?.adsetName || "",
+    sourceChannel: d.sourceChannel || d.payload?.sourceChannel || ""
   };
 }
 
@@ -119,6 +137,14 @@ router.get("/conversations/search",authRequired,async(req,res)=>{
     const snap=await inboxDb.collection("conversations").where("waFrom","in",variants).limit(50).get();
     return res.json({ok:true,items:snap.docs.map(summary),readsEstimate:snap.size,scope:"phone-index"});
   }catch(e){ console.error("inbox search",e); return res.status(500).json({ok:false,error:e.message}); }
+});
+
+router.get("/conversations/:id",authRequired,async(req,res)=>{
+  try{
+    const id=cleanString(decodeURIComponent(req.params.id||""),220);if(!id)return res.status(400).json({ok:false,error:"Conversación inválida"});
+    const snap=await inboxDb.collection("conversations").doc(id).get();if(!snap.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
+    return res.json({ok:true,item:summary(snap),readsEstimate:1});
+  }catch(e){return res.status(500).json({ok:false,error:e.message});}
 });
 
 router.get("/conversations/:id/messages",authRequired,async(req,res)=>{

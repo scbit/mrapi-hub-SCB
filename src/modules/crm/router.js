@@ -1,7 +1,10 @@
 "use strict";
 const express=require("express");
-const {admin,crmDb}=require("../../core/google");
+const {admin,crmDb,inboxDb,storage}=require("../../core/google");
 const {authRequired}=require("../../middleware/auth");
+const Busboy=require("busboy");
+const crypto=require("crypto");
+const config=require("../../core/config");
 const {PIPELINE_STAGES,DEAL_TYPES,DEAL_TYPE_LABELS,LEAD_QUALITY_VALUES,LEAD_QUALITY_LABELS}=require("./constants");
 const {visibleOwners,canSeeOwner,canEditOwner,isAdminLike}=require("./access");
 const router=express.Router();
@@ -13,6 +16,15 @@ function dec(v){try{return JSON.parse(Buffer.from(String(v||""),"base64url").toS
 function normalizeDoc(doc){const d=doc.data()||{};return {id:doc.id,...d,createdAt:ts(d.createdAt),updatedAt:ts(d.updatedAt)};}
 function publicDeal(doc,contact){const d=normalizeDoc(doc);return {...d,contactPhone:String(contact?.phone||d.contactPhone||""),company:String(contact?.company||d.company||"")};}
 function cleanLimit(v,def=50){return Math.max(1,Math.min(100,Number(v||def)||def));}
+
+function sanitizeFilename(v){return String(v||"archivo").replace(/[^a-zA-Z0-9._() -]+/g,"_").replace(/\s+/g," ").trim().slice(-140)||"archivo";}
+function dealFiles(d){return Array.isArray(d?.files)?d.files:[];}
+function isAllowedDealFile(type){return new Set(["application/pdf","image/jpeg","image/png","image/webp"]).has(String(type||"").toLowerCase());}
+function parseDealUpload(req){return new Promise((resolve,reject)=>{
+  const bb=Busboy({headers:req.headers,limits:{fileSize:15*1024*1024,files:1}});let fileData=null,limited=false;
+  bb.on("file",(name,file,info)=>{const chunks=[];let size=0;file.on("data",c=>{chunks.push(c);size+=c.length});file.on("limit",()=>{limited=true});file.on("end",()=>{fileData={name:sanitizeFilename(info.filename),mimeType:String(info.mimeType||"application/octet-stream"),buffer:Buffer.concat(chunks),size};});});
+  bb.on("error",reject);bb.on("finish",()=>{if(limited)return reject(Object.assign(new Error("El archivo supera 15 MB"),{status:400}));resolve(fileData);});req.pipe(bb);
+});}
 
 router.get("/meta",async(req,res)=>{
   try{
@@ -111,6 +123,53 @@ router.get("/deals/:id/note-history",async(req,res)=>{
     const snap=await dealRef.collection("notes").orderBy("createdAt","desc").limit(30).get();
     const history=snap.docs.map(d=>{const x=d.data()||{};let date=null;if(x.createdAt?.toDate)date=x.createdAt.toDate();else if(x.createdAt)date=new Date(x.createdAt);return {id:d.id,note:String(x.note||""),user:String(x.user||""),createdAt:date&&!isNaN(date)?date.toISOString():null,createdAtLabel:date&&!isNaN(date)?date.toLocaleString("es-AR"):""};});
     return res.json({ok:true,history,readsEstimate:1+snap.size});
+  }catch(e){return res.status(500).json({ok:false,error:e.message});}
+});
+
+router.get("/deals/:id/hub-link",async(req,res)=>{
+  try{
+    const dealRef=crmDb.collection("deals").doc(req.params.id);const dealSnap=await dealRef.get();
+    if(!dealSnap.exists)return res.status(404).json({ok:false,found:false,error:"Trato no encontrado"});
+    const deal=dealSnap.data()||{};if(!(await canSeeOwner(req.authUser,deal.owner)))return res.status(403).json({ok:false,found:false,error:"Sin permiso"});
+    const snap=await inboxDb.collection("conversations").where("dealId","==",req.params.id).limit(10).get();
+    if(snap.empty)return res.json({ok:true,found:false,error:"No se encontró conversación vinculada",readsEstimate:1});
+    const tsMillis=v=>{try{return v?.toMillis?v.toMillis():(v?.toDate?v.toDate().getTime():new Date(v||0).getTime()||0)}catch{return 0}};
+    const rows=snap.docs.map(d=>({id:d.id,...(d.data()||{})})).sort((a,b)=>tsMillis(b.lastMessageAt||b.updatedAt)-tsMillis(a.lastMessageAt||a.updatedAt));
+    const selected=rows[0];return res.json({ok:true,found:true,conversationId:selected.id,url:`/inbox?conversationId=${encodeURIComponent(selected.id)}`,readsEstimate:1+snap.size});
+  }catch(e){console.error("hub-link",e);return res.status(500).json({ok:false,found:false,error:e.message});}
+});
+
+router.post("/deals/:id/upload",async(req,res)=>{
+  try{
+    if(!config.filesBucket)return res.status(500).json({ok:false,error:"MRAPI_FILES_BUCKET no configurado"});
+    if(!String(req.headers["content-type"]||"").toLowerCase().includes("multipart/form-data"))return res.status(400).json({ok:false,error:"Content-Type inválido"});
+    const ref=crmDb.collection("deals").doc(req.params.id);const snap=await ref.get();if(!snap.exists)return res.status(404).json({ok:false,error:"Trato no encontrado"});
+    const deal=snap.data()||{};if(!(await canEditOwner(req.authUser,deal.owner)))return res.status(403).json({ok:false,error:"Sin permiso"});
+    const file=await parseDealUpload(req);if(!file||!file.buffer?.length)return res.status(400).json({ok:false,error:"Seleccioná un archivo"});
+    if(!isAllowedDealFile(file.mimeType))return res.status(400).json({ok:false,error:"Solo PDF, JPG, PNG o WEBP"});
+    const fileId=`file_${Date.now()}_${crypto.randomBytes(5).toString("hex")}`;const objectPath=`crm-deals/${req.params.id}/${fileId}-${sanitizeFilename(file.name)}`;
+    const obj=storage.bucket(config.filesBucket).file(objectPath);await obj.save(file.buffer,{resumable:false,contentType:file.mimeType,metadata:{metadata:{dealId:req.params.id,fileId,originalName:file.name}}});
+    const meta={id:fileId,name:file.name,mimeType:file.mimeType,size:file.size,bucket:config.filesBucket,objectPath,createdAt:new Date().toISOString(),createdBy:req.authUser.email||req.authUser.id};
+    await ref.update({files:[...dealFiles(deal),meta],updatedAt:new Date()});return res.json({ok:true,file:meta,readsEstimate:1,writesEstimate:1});
+  }catch(e){console.error("deal upload",e);return res.status(e.status||500).json({ok:false,error:e.message});}
+});
+
+router.get("/deals/:id/files/:fileId/view",async(req,res)=>{
+  try{
+    const snap=await crmDb.collection("deals").doc(req.params.id).get();if(!snap.exists)return res.status(404).send("Trato no encontrado");
+    const deal=snap.data()||{};if(!(await canSeeOwner(req.authUser,deal.owner)))return res.status(403).send("Sin permiso");
+    const meta=dealFiles(deal).find(f=>String(f.id)===String(req.params.fileId));if(!meta?.objectPath)return res.status(404).send("Archivo no encontrado");
+    const obj=storage.bucket(meta.bucket||config.filesBucket).file(meta.objectPath);res.setHeader("Content-Type",meta.mimeType||"application/octet-stream");res.setHeader("Content-Disposition",`inline; filename="${sanitizeFilename(meta.name)}"`);obj.createReadStream().on("error",()=>{if(!res.headersSent)res.status(500).send("Error leyendo archivo")}).pipe(res);
+  }catch(e){return res.status(500).send(e.message||"Error");}
+});
+
+router.delete("/deals/:id/files/:fileId",async(req,res)=>{
+  try{
+    const ref=crmDb.collection("deals").doc(req.params.id);const snap=await ref.get();if(!snap.exists)return res.status(404).json({ok:false,error:"Trato no encontrado"});
+    const deal=snap.data()||{};if(!(await canEditOwner(req.authUser,deal.owner)))return res.status(403).json({ok:false,error:"Sin permiso"});
+    const files=dealFiles(deal),meta=files.find(f=>String(f.id)===String(req.params.fileId));if(!meta)return res.status(404).json({ok:false,error:"Archivo no encontrado"});
+    if(meta.objectPath)await storage.bucket(meta.bucket||config.filesBucket).file(meta.objectPath).delete({ignoreNotFound:true});
+    await ref.update({files:files.filter(f=>String(f.id)!==String(req.params.fileId)),updatedAt:new Date()});return res.json({ok:true,readsEstimate:1,writesEstimate:1});
   }catch(e){return res.status(500).json({ok:false,error:e.message});}
 });
 

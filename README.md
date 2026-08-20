@@ -1,3 +1,17 @@
+# MR API HUB v0.5
+
+Producto: `mrapi-hub`  
+Tenant piloto: `scb`  
+Cloud Run: `mrapi-hub-scb`
+
+## Rutas
+- `/inbox` Bandeja
+- `/crm` CRM responsive
+- `/` HUB
+- `/health` Health check
+
+Ver `docs/V0.5.md` para el alcance de esta versión.
+
 # MR API HUB v0.3
 
 Producto: `mrapi-hub`  

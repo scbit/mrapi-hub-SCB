@@ -135,6 +135,7 @@ function twilioAuthFor(url, source){
 function normalizeMode(v){ return String(v||"BOT").toUpperCase()==="HUMAN" ? "HUMAN" : "BOT"; }
 function preview(text, mediaCount=0){ const t=cleanString(text,160).replace(/\s+/g," "); return t || (mediaCount ? `Adjunto (${mediaCount})` : ""); }
 function cleanOwner(v){ return cleanString(v,180).toLowerCase(); }
+function ownerAliases(owner){ const o=cleanOwner(owner); return uniqueStrings([o,o.includes("@")?o.split("@")[0]:""]).slice(0,2); }
 function cursorAfter(doc){ return doc?.exists ? doc : null; }
 async function saveOutbound(convoRef, sid, payload){ await convoRef.collection("messages").doc(String(sid)).set(payload,{merge:true}); }
 function actorFields(user){
@@ -180,12 +181,13 @@ router.get("/conversations", authRequired, async(req,res)=>{
     const mode=String(req.query.mode||"").toUpperCase();
     const flag=cleanString(req.query.flag,40).toLowerCase();
     const visible=await visibleOwners(req.authUser);
+    const aliases=ownerAliases(owner);
     if(owner && visible!==null && !visible.includes(owner))return res.status(403).json({ok:false,error:"Vendedor fuera de tus permisos"});
     let q=inboxDb.collection("conversations");
-    if(owner)q=q.where("ownerEmail","==",owner);
-    else if(Array.isArray(visible)&&visible.length===1)q=q.where("ownerEmail","==",visible[0]);
-    else if(Array.isArray(visible)&&visible.length>1&&visible.length<=10)q=q.where("ownerEmail","in",visible);
-    else if(Array.isArray(visible)&&visible.length>10)return res.status(400).json({ok:false,error:"Seleccioná un vendedor para listar la bandeja"});
+    if(owner)q=aliases.length>1?q.where("ownerEmail","in",aliases):q.where("ownerEmail","==",owner);
+    else if(Array.isArray(visible)&&visible.length===1){const v=ownerAliases(visible[0]);q=v.length>1?q.where("ownerEmail","in",v):q.where("ownerEmail","==",visible[0]);}
+    else if(Array.isArray(visible)&&visible.length>1&&visible.length<=5){const v=uniqueStrings(visible.flatMap(ownerAliases)).slice(0,10);q=q.where("ownerEmail","in",v);}
+    else if(Array.isArray(visible)&&visible.length>5)return res.status(400).json({ok:false,error:"Seleccioná un vendedor para listar la bandeja"});
     if(line)q=q.where("lineId","==",line);
     if(stage)q=q.where("stage","==",stage);
     if(mode==="BOT"||mode==="HUMAN")q=q.where("mode","==",mode);

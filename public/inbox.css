@@ -11,3 +11,6 @@
 
 /* servidor-2 layout profesional del chat */
 .chatHead{grid-row:1}.adContext{grid-row:2}.messages{grid-row:3;min-height:0}.composer{grid-row:4;align-self:end}.emptyChat{min-height:260px;height:100%}
+
+/* servidor-3 publicidad compacta para no achicar el chat */
+.adContext{padding:8px 12px}.ad-card{max-height:132px;overflow:auto}.ad-card img{width:72px;height:72px}.ad-copy p{max-height:38px;overflow:hidden}.ad-meta{max-height:34px;overflow:auto}

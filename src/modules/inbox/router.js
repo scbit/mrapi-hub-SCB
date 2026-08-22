@@ -2,6 +2,7 @@
 const express = require("express");
 const Busboy = require("busboy");
 const crypto = require("crypto");
+const axios = require("axios");
 const config = require("../../core/config");
 const { inboxDb, admin, storage } = require("../../core/google");
 const wa = require("./whatsapp");
@@ -48,6 +49,31 @@ function summary(doc){
     duplicateConversationIds: uniqueStrings(d.duplicateConversationIds || [])
   };
 }
+function normalizeMediaItem(item, index){
+  if(!item || typeof item !== "object") return null;
+  const url=cleanString(item.url || item.mediaUrl || item.downloadUrl || item.publicUrl || item.signedUrl || item.path,2000);
+  const contentType=cleanString(item.contentType || item.mimeType || item.mediaContentType || item.type,160);
+  const rawName=cleanString(item.filename || item.mediaName || item.name || item.originalname,180);
+  if(!url && !contentType && !rawName) return null;
+  const filename=rawName || (contentType ? `adjunto-${index+1}` : "archivo");
+  return {url,contentType,filename,source:cleanString(item.source,60),index};
+}
+function mediaFromMessageData(d){
+  const items=[];
+  if(Array.isArray(d.media)) d.media.forEach((m,i)=>{ const item=normalizeMediaItem(m,i); if(item) items.push(item); });
+  if(!items.length && Array.isArray(d.mediaUrls)) d.mediaUrls.forEach((url,i)=>{ const item=normalizeMediaItem({url,source:d.source},i); if(item) items.push(item); });
+  const n=Math.max(Number(d.numMedia || d.NumMedia || 0),0);
+  for(let i=0;i<n;i++){
+    const url=d[`MediaUrl${i}`] || d[`mediaUrl${i}`] || (i===0 ? (d.mediaUrl || d.MediaUrl) : "");
+    const contentType=d[`MediaContentType${i}`] || d[`mediaContentType${i}`] || d.mediaContentType || d.contentType || "";
+    const item=normalizeMediaItem({url,contentType,source:d.source},i);
+    if(item && !items.some(x=>x.url && x.url===item.url)) items.push(item);
+  }
+  if(!items.length && (d.mediaUrl || d.downloadUrl || d.publicUrl || d.signedUrl)){
+    const item=normalizeMediaItem(d,0); if(item) items.push(item);
+  }
+  return items;
+}
 function message(doc, conversationId){
   const d=doc.data()||{};
   return {
@@ -66,9 +92,7 @@ function message(doc, conversationId){
     sentByEmail: d.sentByEmail || d.senderEmail || d.sentBy || "",
     sentByUserId: d.sentByUserId || "",
     messageSid: d.messageSid || d.sid || "",
-    media: Array.isArray(d.media) ? d.media.map(m=>({
-      url: m?.url || "", contentType: m?.contentType || m?.mimeType || "", filename: m?.filename || ""
-    })) : [],
+    media: mediaFromMessageData(d),
     template: d.template || null,
     referralCtwaClid: d.referralCtwaClid || d.payload?.referralCtwaClid || "",
     referralAdId: d.referralAdId || d.payload?.referralAdId || d.leadAd?.adId || "",
@@ -80,6 +104,28 @@ function message(doc, conversationId){
     adsetName: d.adsetName || d.leadAd?.adsetName || "",
     sourceChannel: d.sourceChannel || d.payload?.sourceChannel || ""
   };
+}
+
+function isSafeRemoteMediaUrl(raw){
+  try{
+    const u=new URL(String(raw||""));
+    if(u.protocol!=="https:") return false;
+    const host=u.hostname.toLowerCase();
+    if(host==="localhost" || host==="127.0.0.1" || host==="0.0.0.0" || host==="::1") return false;
+    if(host.endsWith(".local")) return false;
+    return true;
+  }catch{return false;}
+}
+function contentDisposition(filename, download){
+  const safe=String(filename||"archivo").replace(/[\r\n"]/g,"").slice(0,160) || "archivo";
+  return `${download ? "attachment" : "inline"}; filename="${safe}"`;
+}
+function twilioAuthFor(url, source){
+  const host=(()=>{try{return new URL(url).hostname.toLowerCase();}catch{return "";}})();
+  const looksTwilio=String(source||"").toLowerCase().includes("twilio") || host.endsWith("twilio.com");
+  return looksTwilio && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
+    ? {username:process.env.TWILIO_ACCOUNT_SID,password:process.env.TWILIO_AUTH_TOKEN}
+    : undefined;
 }
 
 
@@ -174,6 +220,39 @@ router.get("/conversations/:id/messages",authRequired,async(req,res)=>{
     dedup.sort((a,b)=>String(a.timestamp||"").localeCompare(String(b.timestamp||"")));
     return res.json({ok:true,items:dedup,readsEstimate:reads,relatedConversations:related.length});
   }catch(e){ console.error("inbox messages",e); return res.status(500).json({ok:false,error:e.message}); }
+});
+
+router.get("/conversations/:id/messages/:messageId/media/:index",authRequired,async(req,res)=>{
+  try{
+    const id=cleanString(decodeURIComponent(req.params.id||""),220);
+    const messageId=cleanString(decodeURIComponent(req.params.messageId||""),220);
+    const mediaIndex=Number(req.params.index||0);
+    if(!id || !messageId) return res.status(400).send("Mensaje inválido");
+    if(!Number.isInteger(mediaIndex) || mediaIndex<0 || mediaIndex>20) return res.status(400).send("Índice de media inválido");
+
+    const msgSnap=await inboxDb.collection("conversations").doc(id).collection("messages").doc(messageId).get();
+    if(!msgSnap.exists) return res.status(404).send("Mensaje no encontrado");
+
+    const media=mediaFromMessageData(msgSnap.data()||{});
+    const item=media[mediaIndex];
+    if(!item || !item.url) return res.status(404).send("Adjunto no encontrado");
+    if(!isSafeRemoteMediaUrl(item.url)) return res.status(400).send("URL de adjunto inválida");
+
+    const r=await axios.get(item.url,{
+      auth:twilioAuthFor(item.url,item.source),
+      responseType:"arraybuffer",
+      timeout:45000,
+      maxRedirects:3,
+      validateStatus:()=>true
+    });
+    if(r.status<200 || r.status>=300) return res.status(r.status||502).send("No se pudo leer adjunto");
+
+    const contentType=item.contentType || r.headers["content-type"] || "application/octet-stream";
+    res.setHeader("Content-Type",contentType);
+    res.setHeader("Cache-Control","private, max-age=300");
+    res.setHeader("Content-Disposition",contentDisposition(item.filename, String(req.query.download||"")==="1"));
+    return res.send(Buffer.from(r.data));
+  }catch(e){ console.error("inbox media",e); return res.status(500).send("Error obteniendo adjunto"); }
 });
 
 router.post("/conversations/:id/mode",authRequired,async(req,res)=>{

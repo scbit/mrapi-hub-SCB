@@ -194,7 +194,9 @@ router.get("/conversations", authRequired, async(req,res)=>{
     if(flag==="unread")q=q.where("hasUnread","==",true);
     if(flag==="ads")q=q.where("sourceChannel","==","meta_ad");
     if(flag==="nuevo")q=q.where("hasDeal","==",false);
-    q=q.orderBy("lastMessageAt","desc").limit(limit);
+    const hasFilters=!!(owner||line||stage||mode||flag);
+    if(!hasFilters)q=q.orderBy("lastMessageAt","desc");
+    q=q.limit(limit);
     const cursor=cleanString(req.query.cursor,220);
     let cursorRead=0;
     if(cursor){
@@ -203,7 +205,7 @@ router.get("/conversations", authRequired, async(req,res)=>{
       if(after) q=q.startAfter(after);
     }
     const snap=await q.get();
-    const items=snap.docs.map(summary);
+    const items=snap.docs.map(summary).sort((a,b)=>String(b.lastMessageAt||"").localeCompare(String(a.lastMessageAt||"")));
     const last=snap.docs[snap.docs.length-1];
     return res.json({ok:true,items,nextCursor:last?.id||null,hasMore:snap.size===limit,readsEstimate:snap.size+cursorRead,scope:{owner,line,stage,mode,flag}});
   }catch(e){ console.error("inbox list",e); const msg=/index/i.test(String(e.message||""))?"Firestore requiere un índice para este filtro. No se hizo fallback masivo.":e.message; return res.status(500).json({ok:false,error:msg}); }

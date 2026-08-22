@@ -14,3 +14,6 @@
 
 /* servidor-3 publicidad compacta para no achicar el chat */
 .adContext{padding:8px 12px}.ad-card{max-height:132px;overflow:auto}.ad-card img{width:72px;height:72px}.ad-copy p{max-height:38px;overflow:hidden}.ad-meta{max-height:34px;overflow:auto}
+
+/* servidor-4 responsables multiusuario */
+.ownerTag{background:#fff7ed;color:#9a3412}.msgActor{font-weight:900}

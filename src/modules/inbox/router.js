@@ -61,6 +61,10 @@ function message(doc, conversationId){
     to: d.to || "",
     timestamp: iso(d.timestamp || d.createdAt),
     status: d.status || d.deliveryStatus || "",
+    sentBy: d.sentBy || d.sentByName || d.sentByEmail || d.senderName || d.senderEmail || "",
+    sentByName: d.sentByName || d.senderName || d.sentBy || "",
+    sentByEmail: d.sentByEmail || d.senderEmail || d.sentBy || "",
+    sentByUserId: d.sentByUserId || "",
     messageSid: d.messageSid || d.sid || "",
     media: Array.isArray(d.media) ? d.media.map(m=>({
       url: m?.url || "", contentType: m?.contentType || m?.mimeType || "", filename: m?.filename || ""
@@ -82,6 +86,12 @@ function message(doc, conversationId){
 function normalizeMode(v){ return String(v||"BOT").toUpperCase()==="HUMAN" ? "HUMAN" : "BOT"; }
 function preview(text, mediaCount=0){ const t=cleanString(text,160).replace(/\s+/g," "); return t || (mediaCount ? `Adjunto (${mediaCount})` : ""); }
 async function saveOutbound(convoRef, sid, payload){ await convoRef.collection("messages").doc(String(sid)).set(payload,{merge:true}); }
+function actorFields(user){
+  const email=cleanString(user?.email,180).toLowerCase();
+  const name=cleanString(user?.name,180);
+  const id=cleanString(user?.id,120);
+  return {sentBy:name||email||id,sentByName:name||email||id,sentByEmail:email,sentByUserId:id};
+}
 async function loadConversationForSend(id){
   const ref=inboxDb.collection("conversations").doc(id); const snap=await ref.get();
   if(!snap.exists){ const e=new Error("Conversación no encontrada"); e.status=404; throw e; }
@@ -194,7 +204,7 @@ router.post("/conversations/:id/send",authRequired,async(req,res)=>{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const text=cleanString(req.body?.text,4000); if(!text) return res.status(400).json({ok:false,error:"Falta el mensaje"});
     const c=await loadConversationForSend(id); const from=c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const sent=await wa.sendText({from,to,body:text,req,conversationId:id});
-    await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],deliveryStatus:sent.status||"queued",sentBy:req.authUser.email||req.authUser.id});
+    await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],deliveryStatus:sent.status||"queued",...actorFields(req.authUser)});
     await updateAfterSend(c.ref,text,0,sent.status); return res.json({ok:true,sid:sent.sid,status:sent.status||"queued",readsEstimate:1,writesEstimate:2});
   }catch(e){console.error("send",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });
@@ -205,7 +215,7 @@ router.post("/conversations/:id/send-file",authRequired,async(req,res)=>{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const parsed=await parseSingleUpload(req); if(!parsed.text&&!parsed.file) return res.status(400).json({ok:false,error:"Falta texto o archivo"});
     const c=await loadConversationForSend(id); const from=c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const media=parsed.file ? [await uploadOutbound(parsed.file)] : []; const sent=await wa.sendText({from,to,body:parsed.text,mediaUrls:media.map(x=>x.url),req,conversationId:id});
-    await saveOutbound(c.ref,sent.sid,{direction:"OUT",text:parsed.text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:media.length,media,deliveryStatus:sent.status||"queued",sentBy:req.authUser.email||req.authUser.id});
+    await saveOutbound(c.ref,sent.sid,{direction:"OUT",text:parsed.text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:media.length,media,deliveryStatus:sent.status||"queued",...actorFields(req.authUser)});
     await updateAfterSend(c.ref,parsed.text,media.length,sent.status); return res.json({ok:true,sid:sent.sid,mediaCount:media.length,readsEstimate:1,writesEstimate:2});
   }catch(e){console.error("send-file",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });
@@ -215,7 +225,7 @@ router.post("/conversations/:id/send-template",authRequired,async(req,res)=>{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const contentSid=cleanString(req.body?.contentSid,100); const contentVariables=req.body?.contentVariables&&typeof req.body.contentVariables==="object"?req.body.contentVariables:{}; if(!contentSid)return res.status(400).json({ok:false,error:"Falta contentSid"});
     const c=await loadConversationForSend(id); const from=c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to)return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const sent=await wa.sendTemplate({from,to,contentSid,contentVariables,req,conversationId:id}); const text=`Plantilla enviada (${contentSid})`;
-    await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human-template",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],template:{contentSid,contentVariables},deliveryStatus:sent.status||"queued",sentBy:req.authUser.email||req.authUser.id});
+    await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human-template",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],template:{contentSid,contentVariables},deliveryStatus:sent.status||"queued",...actorFields(req.authUser)});
     await updateAfterSend(c.ref,text,0,sent.status); return res.json({ok:true,sid:sent.sid,contentSid,readsEstimate:1,writesEstimate:2});
   }catch(e){console.error("send-template",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });

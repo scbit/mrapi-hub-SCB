@@ -19,8 +19,13 @@ function iso(v) {
 function digits(v){ return String(v || "").replace(/\D/g, ""); }
 function cleanString(v, max=500){ return String(v || "").trim().slice(0,max); }
 function uniqueStrings(values){ return [...new Set((values || []).map(v=>cleanString(v,220)).filter(Boolean))]; }
+function normLower(v){ return cleanString(v,220).toLowerCase(); }
+function ownerValues(d){
+  return uniqueStrings([d.ownerEmail,d.owner,d.assignedOwner,d.assignedOwnerEmail].map(normLower));
+}
 function summary(doc){
   const d = doc.data() || {};
+  const owners=ownerValues(d);
   return {
     id: doc.id,
     contactId: d.contactId || "",
@@ -31,12 +36,14 @@ function summary(doc){
     waFrom: d.waFrom || "",
     inboundTo: d.inboundTo || "",
     lineId: d.lineId || d.inboundTo || "",
-    ownerEmail: d.ownerEmail || "",
+    ownerEmail: d.ownerEmail || d.owner || d.assignedOwnerEmail || d.assignedOwner || "",
+    ownerAliases: owners,
     stage: d.stage || d.dealStage || "nuevo",
     mode: String(d.mode || "BOT").toUpperCase() === "HUMAN" ? "HUMAN" : "BOT",
     lastMessage: d.lastMessagePreview || d.lastMessage || d.lastMessageText || "",
     lastMessageAt: iso(d.lastMessageAt || d.updatedAt),
     unreadCount: Number(d.unreadCount || 0),
+    hasUnread: d.hasUnread === true || Number(d.unreadCount || 0) > 0,
     lastDeliveryStatus: d.lastDeliveryStatus || "",
     sourceChannel: d.sourceChannel || "",
     leadPlatform: d.leadPlatform || d.leadAd?.platform || "",
@@ -137,6 +144,67 @@ function preview(text, mediaCount=0){ const t=cleanString(text,160).replace(/\s+
 function cleanOwner(v){ return cleanString(v,180).toLowerCase(); }
 function ownerAliases(owner){ const o=cleanOwner(owner); return uniqueStrings([o,o.includes("@")?o.split("@")[0]:""]).slice(0,2); }
 function cursorAfter(doc){ return doc?.exists ? doc : null; }
+function lineMatches(item,line){
+  const wanted=cleanString(line,80).replace(/^whatsapp:/i,"");
+  if(!wanted) return true;
+  const values=uniqueStrings([item.lineId,item.inboundTo].map(v=>cleanString(v,80).replace(/^whatsapp:/i,"")));
+  return values.includes(wanted);
+}
+function conversationMatches(item,filters){
+  const ownerSet=filters.ownerSet || new Set();
+  if(ownerSet.size){
+    const values=uniqueStrings([item.ownerEmail,...(item.ownerAliases||[])].map(normLower));
+    if(!values.some(v=>ownerSet.has(v))) return false;
+  }
+  if(!lineMatches(item,filters.line)) return false;
+  if(filters.stage && String(item.stage||"")!==filters.stage) return false;
+  if(filters.mode && item.mode!==filters.mode) return false;
+  if(filters.flag==="unread" && !item.hasUnread) return false;
+  if(filters.flag==="ads" && String(item.sourceChannel||"").toLowerCase()!=="meta_ad") return false;
+  if(filters.flag==="nuevo" && (item.contactId || item.dealId || item.hasDeal)) return false;
+  return true;
+}
+async function loadOrderedFilteredConversations({limit,cursor,filters}){
+  const batchSize=75;
+  const maxReads=300;
+  const items=[];
+  let cursorRead=0;
+  let reads=0;
+  let lastDoc=null;
+  let processedAll=false;
+  let scannedCursor=cursor;
+  if(cursor){
+    const c=await inboxDb.collection("conversations").doc(cursor).get();
+    cursorRead=1;
+    const after=cursorAfter(c);
+    if(after) lastDoc=after;
+  }
+  while(items.length<limit && reads<maxReads){
+    const remaining=Math.max(1,Math.min(batchSize,maxReads-reads));
+    let q=inboxDb.collection("conversations").orderBy("lastMessageAt","desc").limit(remaining);
+    if(lastDoc) q=q.startAfter(lastDoc);
+    const snap=await q.get();
+    reads += snap.size;
+    if(snap.empty){ processedAll=true; break; }
+    lastDoc=snap.docs[snap.docs.length-1];
+    scannedCursor=lastDoc.id;
+    if(snap.size<remaining) processedAll=true;
+    for(const doc of snap.docs){
+      const item=summary(doc);
+      if(conversationMatches(item,filters)) items.push(item);
+      if(items.length>=limit) break;
+    }
+    if(processedAll) break;
+  }
+  return {
+    items,
+    nextCursor: scannedCursor || null,
+    hasMore: !processedAll,
+    readsEstimate: reads + cursorRead,
+    source: "ordered-filter-scan",
+    scanLimit: maxReads
+  };
+}
 async function saveOutbound(convoRef, sid, payload){ await convoRef.collection("messages").doc(String(sid)).set(payload,{merge:true}); }
 function actorFields(user){
   const email=cleanString(user?.email,180).toLowerCase();
@@ -183,19 +251,24 @@ router.get("/conversations", authRequired, async(req,res)=>{
     const visible=await visibleOwners(req.authUser);
     const aliases=ownerAliases(owner);
     if(owner && visible!==null && !visible.includes(owner))return res.status(403).json({ok:false,error:"Vendedor fuera de tus permisos"});
-    let q=inboxDb.collection("conversations");
-    if(owner)q=aliases.length>1?q.where("ownerEmail","in",aliases):q.where("ownerEmail","==",owner);
-    else if(Array.isArray(visible)&&visible.length===1){const v=ownerAliases(visible[0]);q=v.length>1?q.where("ownerEmail","in",v):q.where("ownerEmail","==",visible[0]);}
-    else if(Array.isArray(visible)&&visible.length>1&&visible.length<=5){const v=uniqueStrings(visible.flatMap(ownerAliases)).slice(0,10);q=q.where("ownerEmail","in",v);}
+    const effectiveOwner=flag==="nuevo" ? "" : owner;
+    const effectiveAliases=ownerAliases(effectiveOwner);
+    let ownerSet=new Set(effectiveAliases);
+    if(!effectiveOwner && flag!=="nuevo" && Array.isArray(visible)&&visible.length===1)ownerSet=new Set(ownerAliases(visible[0]));
+    else if(!effectiveOwner && flag!=="nuevo" && Array.isArray(visible)&&visible.length>1&&visible.length<=5)ownerSet=new Set(uniqueStrings(visible.flatMap(ownerAliases)).slice(0,10));
     else if(Array.isArray(visible)&&visible.length>5)return res.status(400).json({ok:false,error:"Seleccioná un vendedor para listar la bandeja"});
+    const hasFilters=!!(effectiveOwner||ownerSet.size||line||stage||mode||flag);
+    if(hasFilters){
+      const filtered=await loadOrderedFilteredConversations({limit,cursor:cleanString(req.query.cursor,220),filters:{ownerSet,line,stage,mode:mode==="BOT"||mode==="HUMAN"?mode:"",flag}});
+      return res.json({ok:true,items:filtered.items,nextCursor:filtered.nextCursor,hasMore:filtered.hasMore,readsEstimate:filtered.readsEstimate,scope:{owner:effectiveOwner,line,stage,mode,flag,source:filtered.source,scanLimit:filtered.scanLimit}});
+    }
+    let q=inboxDb.collection("conversations");
     if(line)q=q.where("lineId","==",line);
     if(stage)q=q.where("stage","==",stage);
     if(mode==="BOT"||mode==="HUMAN")q=q.where("mode","==",mode);
     if(flag==="unread")q=q.where("hasUnread","==",true);
     if(flag==="ads")q=q.where("sourceChannel","==","meta_ad");
-    if(flag==="nuevo")q=q.where("hasDeal","==",false);
-    const hasFilters=!!(owner||line||stage||mode||flag);
-    if(!hasFilters)q=q.orderBy("lastMessageAt","desc");
+    q=q.orderBy("lastMessageAt","desc");
     q=q.limit(limit);
     const cursor=cleanString(req.query.cursor,220);
     let cursorRead=0;

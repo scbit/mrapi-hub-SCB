@@ -65,12 +65,13 @@ async function readDealById(id,user){
 async function readDealsByContact(contactId,user){
   const cleanContactId=clean(contactId,160);
   if(!cleanContactId)return {deals:[],reads:0};
-  const snap=await crmDb.collection("deals").where("contactId","==",cleanContactId).orderBy("createdAt","desc").limit(10).get();
+  const snap=await crmDb.collection("deals").where("contactId","==",cleanContactId).limit(10).get();
   const deals=[];
   for(const doc of snap.docs){
     const data=doc.data()||{};
     if(await canSeeOwner(user,data.owner))deals.push(publicDoc(doc));
   }
+  deals.sort((a,b)=>String(b.createdAt||"").localeCompare(String(a.createdAt||"")));
   return {deals,reads:snap.size};
 }
 async function readContactNotes(contactId,user){

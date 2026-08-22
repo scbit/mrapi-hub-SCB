@@ -61,12 +61,12 @@ Leyenda: ✅ portado · 🟡 parcial · ❌ pendiente · 🔄 se rediseña dentr
 | Contexto de publicidad Meta guardado en conversación | ✅ visualización |
 | Facebook / Instagram / Meta Ads badge | ✅ |
 | Título/texto/Ad ID/campaña/ad set/imagen | ✅ cuando existe en `bsscb` |
-| Conversación ↔ contacto ↔ trato completo | 🟡 |
-| Contexto completo de contacto en panel HUB | ❌ |
+| Conversación ↔ contacto ↔ trato completo | 🟡 | `servidor-1`: contexto acotado desde Bandeja |
+| Contexto completo de contacto en panel HUB | 🟡 | `servidor-1`: contacto, trato, notas y actividades limitadas |
 | Editar contacto desde HUB | ❌ |
-| Crear contacto/trato rápido desde chat | ❌ |
-| Notas de contacto y trato desde HUB | ❌ |
-| Actividades del trato | ❌ |
+| Crear contacto/trato rápido desde chat | ✅ | `servidor-1`, acción manual |
+| Notas de contacto y trato desde HUB | ✅ | `servidor-1`, acción manual |
+| Actividades del trato | 🟡 | `servidor-1`: últimas 10 |
 | Archivos del trato dentro del HUB | ❌ |
 | Tickets HUB | ❌ |
 | Automatizaciones / supervisor | ❌ |

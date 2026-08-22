@@ -4,9 +4,11 @@ const Busboy = require("busboy");
 const crypto = require("crypto");
 const axios = require("axios");
 const config = require("../../core/config");
-const { inboxDb, admin, storage } = require("../../core/google");
+const { crmDb, inboxDb, admin, storage } = require("../../core/google");
 const wa = require("./whatsapp");
 const { authRequired } = require("../../middleware/auth");
+const { visibleOwners, isAdminLike } = require("../crm/access");
+const { PIPELINE_STAGES } = require("../crm/constants");
 const router = express.Router();
 const FieldValue = admin.firestore.FieldValue;
 
@@ -23,6 +25,7 @@ function summary(doc){
     id: doc.id,
     contactId: d.contactId || "",
     dealId: d.dealId || "",
+    hasDeal: d.hasDeal === true || !!d.dealId,
     contactName: d.contactName || d.profileName || d.name || "",
     companyName: d.companyName || "",
     waFrom: d.waFrom || "",
@@ -131,6 +134,8 @@ function twilioAuthFor(url, source){
 
 function normalizeMode(v){ return String(v||"BOT").toUpperCase()==="HUMAN" ? "HUMAN" : "BOT"; }
 function preview(text, mediaCount=0){ const t=cleanString(text,160).replace(/\s+/g," "); return t || (mediaCount ? `Adjunto (${mediaCount})` : ""); }
+function cleanOwner(v){ return cleanString(v,180).toLowerCase(); }
+function cursorAfter(doc){ return doc?.exists ? doc : null; }
 async function saveOutbound(convoRef, sid, payload){ await convoRef.collection("messages").doc(String(sid)).set(payload,{merge:true}); }
 function actorFields(user){
   const email=cleanString(user?.email,180).toLowerCase();
@@ -169,18 +174,49 @@ router.get("/conversations", authRequired, async(req,res)=>{
   try{
     const requested=Number(req.query.limit||config.inboxPageSize);
     const limit=Math.max(10,Math.min(requested,config.inboxMaxPageSize));
-    let q=inboxDb.collection("conversations").orderBy("lastMessageAt","desc").limit(limit);
+    const owner=cleanOwner(req.query.owner);
+    const line=cleanString(req.query.line,80).replace(/^whatsapp:/i,"");
+    const stage=cleanString(req.query.stage,80);
+    const mode=String(req.query.mode||"").toUpperCase();
+    const flag=cleanString(req.query.flag,40).toLowerCase();
+    const visible=await visibleOwners(req.authUser);
+    if(owner && visible!==null && !visible.includes(owner))return res.status(403).json({ok:false,error:"Vendedor fuera de tus permisos"});
+    let q=inboxDb.collection("conversations");
+    if(owner)q=q.where("ownerEmail","==",owner);
+    else if(Array.isArray(visible)&&visible.length===1)q=q.where("ownerEmail","==",visible[0]);
+    else if(Array.isArray(visible)&&visible.length>1&&visible.length<=10)q=q.where("ownerEmail","in",visible);
+    else if(Array.isArray(visible)&&visible.length>10)return res.status(400).json({ok:false,error:"Seleccioná un vendedor para listar la bandeja"});
+    if(line)q=q.where("lineId","==",line);
+    if(stage)q=q.where("stage","==",stage);
+    if(mode==="BOT"||mode==="HUMAN")q=q.where("mode","==",mode);
+    if(flag==="unread")q=q.where("hasUnread","==",true);
+    if(flag==="ads")q=q.where("sourceChannel","==","meta_ad");
+    if(flag==="nuevo")q=q.where("hasDeal","==",false);
+    q=q.orderBy("lastMessageAt","desc").limit(limit);
     const cursor=cleanString(req.query.cursor,220);
     let cursorRead=0;
     if(cursor){
       const c=await inboxDb.collection("conversations").doc(cursor).get(); cursorRead=1;
-      if(c.exists) q=q.startAfter(c);
+      const after=cursorAfter(c);
+      if(after) q=q.startAfter(after);
     }
     const snap=await q.get();
     const items=snap.docs.map(summary);
     const last=snap.docs[snap.docs.length-1];
-    return res.json({ok:true,items,nextCursor:last?.id||null,hasMore:snap.size===limit,readsEstimate:snap.size+cursorRead});
-  }catch(e){ console.error("inbox list",e); return res.status(500).json({ok:false,error:e.message}); }
+    return res.json({ok:true,items,nextCursor:last?.id||null,hasMore:snap.size===limit,readsEstimate:snap.size+cursorRead,scope:{owner,line,stage,mode,flag}});
+  }catch(e){ console.error("inbox list",e); const msg=/index/i.test(String(e.message||""))?"Firestore requiere un índice para este filtro. No se hizo fallback masivo.":e.message; return res.status(500).json({ok:false,error:msg}); }
+});
+
+router.get("/filters",authRequired,async(req,res)=>{
+  try{
+    const owners=await visibleOwners(req.authUser);
+    let ownerOptions=[]; let reads=0;
+    if(isAdminLike(req.authUser)){
+      const s=await crmDb.collection("users").orderBy("name","asc").limit(250).get(); reads+=s.size;
+      ownerOptions=s.docs.map(d=>({id:d.id,name:(d.data()||{}).name||"",email:String((d.data()||{}).email||"").toLowerCase(),role:(d.data()||{}).role||""})).filter(x=>x.email);
+    }else if(Array.isArray(owners)) ownerOptions=owners.map(email=>({email,name:email}));
+    return res.json({ok:true,owners:ownerOptions,stages:PIPELINE_STAGES,readsEstimate:reads});
+  }catch(e){return res.status(500).json({ok:false,error:e.message});}
 });
 
 router.get("/conversations/search",authRequired,async(req,res)=>{

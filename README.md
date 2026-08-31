@@ -21,19 +21,26 @@ Ver `docs/V0.3.md` y `docs/READS-STRATEGY.md`.
 ## v0.6
 CRM operativo: vistas guardadas, stages reordenables/ocultables/colapsables, scrollbar horizontal dentro del viewport, carga incremental global y por stage, y acciones masivas.
 
-## v0.8
+## v0.9
 
 Paridad CRM ↔ HUB: archivos de trato, acceso directo a conversación y contexto de publicidad Meta/Facebook/Instagram. Ver `docs/V0.7.md` y `docs/PARITY-MATRIX.md`.
 
 
-## v0.8
+## v0.9
 - Publicidad: el texto de la tarjeta queda fijado al primer mensaje inbound del lead asociado al anuncio, no al último mensaje del cliente.
 - Versión visible actualizada en `/`, CRM, Bandeja y health endpoints.
 
 
-## v0.8
+## v0.9
 - HUB 3 columnas optimizado para uso diario.
 - Usuario visible en mensajes salientes, compatible con metadata legacy.
 - Resumen CRM lateral al abrir conversación, cargado bajo demanda y cacheado en cliente.
 - Acceso directo HUB → trato CRM.
 - Responsive: panel CRM se vuelve drawer en tablet/móvil.
+
+
+## v0.9
+- Crear ticket en Desk directamente desde HUB.
+- Cambiar stage del trato desde el panel CRM lateral.
+- Ver, abrir, adjuntar y eliminar archivos del trato desde HUB.
+- Sin scans nuevos: las acciones usan IDs directos y el ticket crea escrituras directas en Desk.

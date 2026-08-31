@@ -3,11 +3,12 @@ const express = require("express");
 const Busboy = require("busboy");
 const crypto = require("crypto");
 const config = require("../../core/config");
-const { inboxDb, crmDb, admin, storage } = require("../../core/google");
+const { inboxDb, crmDb, deskDb, admin, storage } = require("../../core/google");
 const wa = require("./whatsapp");
 const { authRequired } = require("../../middleware/auth");
 const router = express.Router();
 const FieldValue = admin.firestore.FieldValue;
+const { PIPELINE_STAGES } = require("../crm/constants");
 
 function iso(v) {
   try { return v?.toDate ? v.toDate().toISOString() : (v instanceof Date ? v.toISOString() : v || null); }
@@ -160,7 +161,7 @@ router.get("/conversations/:id/crm-summary",authRequired,async(req,res)=>{
     if(dealId){const d=await crmDb.collection("deals").doc(dealId).get();reads++;if(d.exists){const x=d.data()||{};deal={id:d.id,title:x.title||x.name||"",stage:x.stage||"",owner:x.owner||"",dealType:x.dealType||"",leadQuality:x.leadQuality||"",value:Number(x.value||0),dueDate:iso(x.dueDate),notes:x.notes||"",contactId:x.contactId||contactId,files:Array.isArray(x.files)?x.files.map(f=>({id:f?.id||"",name:f?.name||f?.filename||"",mimeType:f?.mimeType||f?.contentType||""})):[]};}}
     const resolvedContactId=cleanString(deal?.contactId||contactId,220);
     if(resolvedContactId){const d=await crmDb.collection("contacts").doc(resolvedContactId).get();reads++;if(d.exists){const x=d.data()||{};contact={id:d.id,name:x.name||x.fullName||c.contactName||"",company:x.company||x.companyName||c.companyName||"",phone:x.phone||c.waFrom||"",email:x.email||"",owner:x.owner||deal?.owner||c.ownerEmail||"",city:x.city||x.location||""};}}
-    return res.json({ok:true,deal,contact,readsEstimate:reads});
+    return res.json({ok:true,deal,contact,stages:PIPELINE_STAGES,readsEstimate:reads});
   }catch(e){console.error("inbox crm-summary",e);return res.status(500).json({ok:false,error:e.message});}
 });
 
@@ -244,6 +245,25 @@ router.post("/twilio/status",express.urlencoded({extended:false}),async(req,res)
     await inboxDb.collection("conversations").doc(conversationId).set({lastDeliveryStatus:status},{merge:true});
     return res.status(204).end();
   }catch(e){console.error("twilio-status",e);return res.status(204).end();}
+});
+
+router.post("/conversations/:id/tickets",authRequired,async(req,res)=>{
+  try{
+    const id=cleanString(decodeURIComponent(req.params.id||""),220);if(!id)return res.status(400).json({ok:false,error:"Conversación inválida"});
+    const convo=await inboxDb.collection("conversations").doc(id).get();if(!convo.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
+    const c=convo.data()||{}, body=req.body||{};
+    const ref=deskDb.collection("tickets").doc();
+    const userId=String(req.authUser.id||"");const userName=String(req.authUser.name||req.authUser.email||"");const userEmail=String(req.authUser.email||"").toLowerCase();
+    const title=cleanString(body.title||`Seguimiento: ${c.contactName||c.profileName||c.waFrom||"cliente"}`,180);
+    if(!title)return res.status(400).json({ok:false,error:"El título es obligatorio"});
+    const priority=["low","medium","high","urgent"].includes(String(body.priority||""))?String(body.priority):"medium";
+    let dueAt=null;if(body.dueAt){const d=new Date(body.dueAt);if(!Number.isNaN(d.getTime()))dueAt=d;}
+    const ticketNumber=`TCK-${new Date().getFullYear()}-${ref.id.slice(0,6).toUpperCase()}`;
+    const data={ticketNumber,ticketType:"personal",title,description:cleanString(body.description,3000),status:"open",priority,assignedUserId:userId,assignedUserIds:userId?[userId]:[],assignedUsers:userId?[{id:userId,name:userName,email:userEmail}]:[],assignedUserName:userName,createdByUserId:userId,createdByUserName:userName,dueAt,checklist:[],crmContactId:cleanString(c.contactId,220),crmDealId:cleanString(c.dealId,220),crmDealName:cleanString(body.dealName,220),opsOperationId:"",opsOperationName:"",commentCount:0,fileCount:0,createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp(),createdFrom:"MRAPI_HUB",hubConversationId:id,hubUrl:`${config.publicBaseUrl||""}/inbox?conversationId=${encodeURIComponent(id)}`,hubCustomerName:cleanString(c.contactName||c.profileName,220),hubPhone:cleanString(c.waFrom,80),hubStage:cleanString(body.stage||c.stage||c.dealStage,120)};
+    await ref.set(data);
+    await ref.collection("events").add({type:"created",text:"Ticket creado desde MR API HUB",userId,userName,createdAt:FieldValue.serverTimestamp()});
+    return res.json({ok:true,ticketId:ref.id,ticketNumber,deskUrl:`${config.deskBaseUrl}/?ticketId=${encodeURIComponent(ref.id)}`,readsEstimate:1,writesEstimate:2});
+  }catch(e){console.error("create hub ticket",e);return res.status(500).json({ok:false,error:e.message||"Error creando ticket"});}
 });
 
 module.exports=router;

@@ -6,5 +6,6 @@ const config = require("./config");
 if (!admin.apps.length) admin.initializeApp();
 const crmDb = getFirestore(admin.app(), config.crmDb);
 const inboxDb = getFirestore(admin.app(), config.inboxDb);
+const deskDb = getFirestore(admin.app(), config.deskDb);
 const storage = new Storage();
-module.exports = { admin, crmDb, inboxDb, storage };
+module.exports = { admin, crmDb, inboxDb, deskDb, storage };

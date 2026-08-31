@@ -21,6 +21,11 @@ Ver `docs/V0.3.md` y `docs/READS-STRATEGY.md`.
 ## v0.6
 CRM operativo: vistas guardadas, stages reordenables/ocultables/colapsables, scrollbar horizontal dentro del viewport, carga incremental global y por stage, y acciones masivas.
 
-## vservidor-4
+## v0.7.3
 
 Paridad CRM ↔ HUB: archivos de trato, acceso directo a conversación y contexto de publicidad Meta/Facebook/Instagram. Ver `docs/V0.7.md` y `docs/PARITY-MATRIX.md`.
+
+
+## v0.7.3
+- Publicidad: el texto de la tarjeta queda fijado al primer mensaje inbound del lead asociado al anuncio, no al último mensaje del cliente.
+- Versión visible actualizada en `/`, CRM, Bandeja y health endpoints.

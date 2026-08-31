@@ -17,7 +17,7 @@
 @media(max-width:850px){.hubActions{grid-template-columns:1fr}.ticketGrid{grid-template-columns:1fr}.ticketModal{border-radius:15px}.crmStageEditor select{font-size:14px}}
 .crmFileRow .fileView{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;font-weight:750;color:#344054;text-align:left;border:0;background:transparent;padding:0;cursor:pointer}
 
-/* MR API HUB v1.0 — SCB premium visual system */
+/* MR API HUB v1.0.1 — SCB premium visual system */
 :root{--scb-green:#2fb71b;--scb-green-dark:#21970f;--scb-orange:#ff8612;--scb-ink:#20242b;--scb-muted:#7d8797;--scb-line:#e7ebef;--scb-bg:#f7f9f7;--scb-soft:#f1f7ef}
 body{background:var(--scb-bg);color:var(--scb-ink)}
 .shell{grid-template-rows:78px 104px 1fr;background:#fff}.scbTopbar{background:#fff;color:var(--scb-ink);border-bottom:1px solid var(--scb-line);padding:0 24px;box-shadow:0 1px 8px rgba(32,36,43,.03)}

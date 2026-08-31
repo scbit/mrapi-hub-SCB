@@ -9,6 +9,7 @@ const { authRequired } = require("../../middleware/auth");
 const router = express.Router();
 const FieldValue = admin.firestore.FieldValue;
 const { PIPELINE_STAGES } = require("../crm/constants");
+const { visibleOwners, canSeeOwner, isAdminLike } = require("../crm/access");
 
 function iso(v) {
   try { return v?.toDate ? v.toDate().toISOString() : (v instanceof Date ? v.toISOString() : v || null); }
@@ -28,7 +29,9 @@ function summary(doc){
     waFrom: d.waFrom || "",
     inboundTo: d.inboundTo || "",
     lineId: d.lineId || d.inboundTo || "",
-    ownerEmail: d.ownerEmail || "",
+    ownerEmail: String(d.ownerEmail || "").toLowerCase(),
+    isAssigned: Boolean(String(d.ownerEmail || "").trim()),
+    isLinked: Boolean(String(d.dealId || "").trim() || String(d.contactId || "").trim()),
     stage: d.stage || d.dealStage || "nuevo",
     mode: String(d.mode || "BOT").toUpperCase() === "HUMAN" ? "HUMAN" : "BOT",
     lastMessage: d.lastMessagePreview || d.lastMessage || d.lastMessageText || "",
@@ -118,7 +121,20 @@ router.get("/conversations", authRequired, async(req,res)=>{
   try{
     const requested=Number(req.query.limit||config.inboxPageSize);
     const limit=Math.max(10,Math.min(requested,config.inboxMaxPageSize));
-    let q=inboxDb.collection("conversations").orderBy("lastMessageAt","desc").limit(limit);
+    const requestedOwners=uniqueStrings(String(req.query.owners||"").split(",").map(x=>String(x||"").toLowerCase())).slice(0,10);
+    const visible=await visibleOwners(req.authUser);
+    let owners=requestedOwners;
+    if(visible!==null){
+      if(owners.some(x=>!visible.includes(x))) return res.status(403).json({ok:false,error:"Owner fuera de tus permisos"});
+      if(!owners.length){
+        const own=String(req.authUser?.email||"").trim().toLowerCase();
+        owners=visible.length>10?(own&&visible.includes(own)?[own]:visible.slice(0,10)):visible.slice(0,10);
+      }
+    }
+    let q=inboxDb.collection("conversations");
+    if(owners.length===1) q=q.where("ownerEmail","==",owners[0]);
+    else if(owners.length>1) q=q.where("ownerEmail","in",owners);
+    q=q.orderBy("lastMessageAt","desc").limit(limit);
     const cursor=cleanString(req.query.cursor,220);
     let cursorRead=0;
     if(cursor){
@@ -128,8 +144,12 @@ router.get("/conversations", authRequired, async(req,res)=>{
     const snap=await q.get();
     const items=snap.docs.map(summary);
     const last=snap.docs[snap.docs.length-1];
-    return res.json({ok:true,items,nextCursor:last?.id||null,hasMore:snap.size===limit,readsEstimate:snap.size+cursorRead});
-  }catch(e){ console.error("inbox list",e); return res.status(500).json({ok:false,error:e.message}); }
+    return res.json({ok:true,items,nextCursor:last?.id||null,hasMore:snap.size===limit,readsEstimate:snap.size+cursorRead,ownersApplied:owners});
+  }catch(e){
+    console.error("inbox list",e);
+    const msg=/index/i.test(String(e.message||""))?"Firestore requiere un índice para este filtro de owner. No se hizo fallback masivo.":e.message;
+    return res.status(500).json({ok:false,error:msg});
+  }
 });
 
 router.get("/conversations/search",authRequired,async(req,res)=>{
@@ -165,6 +185,42 @@ router.get("/conversations/:id/crm-summary",authRequired,async(req,res)=>{
   }catch(e){console.error("inbox crm-summary",e);return res.status(500).json({ok:false,error:e.message});}
 });
 
+
+function normalizedOwner(v){ return String(v||"").trim().toLowerCase(); }
+async function chooseOwner(user, requested, fallback){
+  const owner=normalizedOwner(requested||fallback||user?.email||"");
+  if(!owner) return "";
+  if(!(await canSeeOwner(user,owner)) && !isAdminLike(user)){ const e=new Error("No podés asignar ese owner"); e.status=403; throw e; }
+  return owner;
+}
+router.post("/conversations/:id/contact",authRequired,async(req,res)=>{
+  try{
+    const id=cleanString(decodeURIComponent(req.params.id||""),220); const ref=inboxDb.collection("conversations").doc(id); const snap=await ref.get();
+    if(!snap.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"}); const c=snap.data()||{};
+    if(c.contactId)return res.json({ok:true,contactId:String(c.contactId),existing:true,readsEstimate:1,writesEstimate:0});
+    const owner=await chooseOwner(req.authUser,req.body?.owner,c.ownerEmail); const contactRef=crmDb.collection("contacts").doc(); const now=FieldValue.serverTimestamp();
+    const data={name:cleanString(req.body?.name||c.contactName||c.profileName||c.waFrom,180),phone:cleanString(req.body?.phone||c.waFrom,80),company:cleanString(req.body?.company||c.companyName,180),email:cleanString(req.body?.email,180).toLowerCase(),owner,source:"MRAPI_HUB",hubConversationId:id,createdAt:now,updatedAt:now};
+    await contactRef.set(data);
+    await ref.set({contactId:contactRef.id,ownerEmail:owner,crmLinked:true,isAssigned:Boolean(owner),updatedAt:FieldValue.serverTimestamp()},{merge:true});
+    return res.json({ok:true,contactId:contactRef.id,readsEstimate:1,writesEstimate:2});
+  }catch(e){return res.status(e.status||500).json({ok:false,error:e.message});}
+});
+router.post("/conversations/:id/deal",authRequired,async(req,res)=>{
+  try{
+    const id=cleanString(decodeURIComponent(req.params.id||""),220); const ref=inboxDb.collection("conversations").doc(id); const snap=await ref.get();
+    if(!snap.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"}); const c=snap.data()||{};
+    if(c.dealId)return res.json({ok:true,dealId:String(c.dealId),contactId:String(c.contactId||""),existing:true,readsEstimate:1,writesEstimate:0});
+    const owner=await chooseOwner(req.authUser,req.body?.owner,c.ownerEmail); const now=FieldValue.serverTimestamp(); let contactId=cleanString(c.contactId,220); let contactRef=null; let writes=0;
+    if(!contactId){contactRef=crmDb.collection("contacts").doc();contactId=contactRef.id;}
+    const dealRef=crmDb.collection("deals").doc(); const stage=PIPELINE_STAGES.includes(req.body?.stage)?req.body.stage:"Nuevos Prospectos";
+    const dealData={title:cleanString(req.body?.title||c.contactName||c.companyName||c.waFrom||"Nuevo trato",180),contactId,owner,stage,dealType:"",leadQuality:"",value:0,notes:"",hubConversationId:id,createdAt:now,updatedAt:now};
+    if(contactRef){await contactRef.set({name:cleanString(req.body?.name||c.contactName||c.profileName||c.waFrom,180),phone:cleanString(c.waFrom,80),company:cleanString(c.companyName,180),email:"",owner,source:"MRAPI_HUB",hubConversationId:id,createdAt:now,updatedAt:now});writes++;}
+    await dealRef.set(dealData);writes++;
+    await ref.set({contactId,dealId:dealRef.id,ownerEmail:owner,stage,crmLinked:true,isAssigned:Boolean(owner),updatedAt:FieldValue.serverTimestamp()},{merge:true});writes++;
+    return res.json({ok:true,dealId:dealRef.id,contactId,readsEstimate:1,writesEstimate:writes});
+  }catch(e){return res.status(e.status||500).json({ok:false,error:e.message});}
+});
+
 router.get("/conversations/:id/messages",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);
@@ -196,7 +252,7 @@ router.post("/conversations/:id/mode",authRequired,async(req,res)=>{
 router.post("/conversations/:id/read",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);
-    await inboxDb.collection("conversations").doc(id).set({unreadCount:0,lastReadAt:FieldValue.serverTimestamp(),lastReadBy:req.authUser.email||req.authUser.id},{merge:true});
+    await inboxDb.collection("conversations").doc(id).set({hasUnread:false,unreadCount:0,lastReadAt:FieldValue.serverTimestamp(),lastReadBy:req.authUser.email||req.authUser.id},{merge:true});
     return res.json({ok:true,writesEstimate:1});
   }catch(e){ console.error("inbox read",e); return res.status(500).json({ok:false,error:e.message}); }
 });

@@ -3,7 +3,7 @@ const express = require("express");
 const Busboy = require("busboy");
 const crypto = require("crypto");
 const config = require("../../core/config");
-const { inboxDb, admin, storage } = require("../../core/google");
+const { inboxDb, crmDb, admin, storage } = require("../../core/google");
 const wa = require("./whatsapp");
 const { authRequired } = require("../../middleware/auth");
 const router = express.Router();
@@ -74,7 +74,11 @@ function message(doc, conversationId){
     referralImageUrl: d.referralImageUrl || d.payload?.referralImageUrl || d.leadAd?.imageUrl || "",
     campaignName: d.campaignName || d.leadAd?.campaignName || "",
     adsetName: d.adsetName || d.leadAd?.adsetName || "",
-    sourceChannel: d.sourceChannel || d.payload?.sourceChannel || ""
+    sourceChannel: d.sourceChannel || d.payload?.sourceChannel || "",
+    sentBy: d.sentBy || d.sentByName || d.senderName || d.sentByEmail || d.senderEmail || "",
+    sentByName: d.sentByName || d.senderName || d.userName || "",
+    sentByEmail: d.sentByEmail || d.senderEmail || "",
+    sentByUserId: d.sentByUserId || d.userId || ""
   };
 }
 
@@ -147,6 +151,19 @@ router.get("/conversations/:id",authRequired,async(req,res)=>{
   }catch(e){return res.status(500).json({ok:false,error:e.message});}
 });
 
+router.get("/conversations/:id/crm-summary",authRequired,async(req,res)=>{
+  try{
+    const id=cleanString(decodeURIComponent(req.params.id||""),220);if(!id)return res.status(400).json({ok:false,error:"Conversación inválida"});
+    const convo=await inboxDb.collection("conversations").doc(id).get();if(!convo.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
+    const c=convo.data()||{};let reads=1,deal=null,contact=null;
+    const dealId=cleanString(c.dealId,220),contactId=cleanString(c.contactId,220);
+    if(dealId){const d=await crmDb.collection("deals").doc(dealId).get();reads++;if(d.exists){const x=d.data()||{};deal={id:d.id,title:x.title||x.name||"",stage:x.stage||"",owner:x.owner||"",dealType:x.dealType||"",leadQuality:x.leadQuality||"",value:Number(x.value||0),dueDate:iso(x.dueDate),notes:x.notes||"",contactId:x.contactId||contactId,files:Array.isArray(x.files)?x.files.map(f=>({id:f?.id||"",name:f?.name||f?.filename||"",mimeType:f?.mimeType||f?.contentType||""})):[]};}}
+    const resolvedContactId=cleanString(deal?.contactId||contactId,220);
+    if(resolvedContactId){const d=await crmDb.collection("contacts").doc(resolvedContactId).get();reads++;if(d.exists){const x=d.data()||{};contact={id:d.id,name:x.name||x.fullName||c.contactName||"",company:x.company||x.companyName||c.companyName||"",phone:x.phone||c.waFrom||"",email:x.email||"",owner:x.owner||deal?.owner||c.ownerEmail||"",city:x.city||x.location||""};}}
+    return res.json({ok:true,deal,contact,readsEstimate:reads});
+  }catch(e){console.error("inbox crm-summary",e);return res.status(500).json({ok:false,error:e.message});}
+});
+
 router.get("/conversations/:id/messages",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);
@@ -194,7 +211,7 @@ router.post("/conversations/:id/send",authRequired,async(req,res)=>{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const text=cleanString(req.body?.text,4000); if(!text) return res.status(400).json({ok:false,error:"Falta el mensaje"});
     const c=await loadConversationForSend(id); const from=c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const sent=await wa.sendText({from,to,body:text,req,conversationId:id});
-    await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],deliveryStatus:sent.status||"queued",sentBy:req.authUser.email||req.authUser.id});
+    await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
     await updateAfterSend(c.ref,text,0,sent.status); return res.json({ok:true,sid:sent.sid,status:sent.status||"queued",readsEstimate:1,writesEstimate:2});
   }catch(e){console.error("send",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });
@@ -205,7 +222,7 @@ router.post("/conversations/:id/send-file",authRequired,async(req,res)=>{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const parsed=await parseSingleUpload(req); if(!parsed.text&&!parsed.file) return res.status(400).json({ok:false,error:"Falta texto o archivo"});
     const c=await loadConversationForSend(id); const from=c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const media=parsed.file ? [await uploadOutbound(parsed.file)] : []; const sent=await wa.sendText({from,to,body:parsed.text,mediaUrls:media.map(x=>x.url),req,conversationId:id});
-    await saveOutbound(c.ref,sent.sid,{direction:"OUT",text:parsed.text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:media.length,media,deliveryStatus:sent.status||"queued",sentBy:req.authUser.email||req.authUser.id});
+    await saveOutbound(c.ref,sent.sid,{direction:"OUT",text:parsed.text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:media.length,media,deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
     await updateAfterSend(c.ref,parsed.text,media.length,sent.status); return res.json({ok:true,sid:sent.sid,mediaCount:media.length,readsEstimate:1,writesEstimate:2});
   }catch(e){console.error("send-file",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });
@@ -215,7 +232,7 @@ router.post("/conversations/:id/send-template",authRequired,async(req,res)=>{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const contentSid=cleanString(req.body?.contentSid,100); const contentVariables=req.body?.contentVariables&&typeof req.body.contentVariables==="object"?req.body.contentVariables:{}; if(!contentSid)return res.status(400).json({ok:false,error:"Falta contentSid"});
     const c=await loadConversationForSend(id); const from=c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to)return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const sent=await wa.sendTemplate({from,to,contentSid,contentVariables,req,conversationId:id}); const text=`Plantilla enviada (${contentSid})`;
-    await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human-template",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],template:{contentSid,contentVariables},deliveryStatus:sent.status||"queued",sentBy:req.authUser.email||req.authUser.id});
+    await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human-template",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],template:{contentSid,contentVariables},deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
     await updateAfterSend(c.ref,text,0,sent.status); return res.json({ok:true,sid:sent.sid,contentSid,readsEstimate:1,writesEstimate:2});
   }catch(e){console.error("send-template",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });

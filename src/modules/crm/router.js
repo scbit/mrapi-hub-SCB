@@ -174,6 +174,22 @@ router.delete("/deals/:id/files/:fileId",async(req,res)=>{
 });
 
 router.get("/contacts/:id",async(req,res)=>{try{const d=await crmDb.collection("contacts").doc(req.params.id).get();if(!d.exists)return res.status(404).json({ok:false,error:"Contacto no encontrado"});if(!(await canSeeOwner(req.authUser,(d.data()||{}).owner)))return res.status(403).json({ok:false,error:"Sin permiso"});return res.json({ok:true,item:normalizeDoc(d),readsEstimate:1});}catch(e){return res.status(500).json({ok:false,error:e.message});}});
+router.put("/contacts/:id",async(req,res)=>{
+  try{
+    const ref=crmDb.collection("contacts").doc(req.params.id),d=await ref.get();
+    if(!d.exists)return res.status(404).json({ok:false,error:"Contacto no encontrado"});
+    const old=d.data()||{};
+    if(!(await canEditOwner(req.authUser,old.owner)))return res.status(403).json({ok:false,error:"Sin permiso"});
+    const p={updatedAt:new Date()};
+    if(Object.prototype.hasOwnProperty.call(req.body||{},"owner")){
+      const owner=String(req.body.owner||"").trim().toLowerCase();
+      if(owner&&!(await canSeeOwner(req.authUser,owner)))return res.status(403).json({ok:false,error:"No podés asignar ese owner"});
+      p.owner=owner;
+    }
+    await ref.update(p);
+    return res.json({ok:true,readsEstimate:1,writesEstimate:1});
+  }catch(e){return res.status(500).json({ok:false,error:e.message});}
+});
 
 router.get("/lookup",async(req,res)=>{
   try{const term=String(req.query.q||"").trim();if(!term)return res.json({ok:true,items:[],readsEstimate:0});let reads=0,items=[];

@@ -58,3 +58,8 @@ Paridad CRM ↔ HUB: archivos de trato, acceso directo a conversación y context
 
 ## v1.1
 Bandeja: creación contacto/trato, filtros rápidos y multi-owner con permisos.
+
+## v1.2
+- Crear trato con todas las etapas del CRM y filtro de etapas.
+- Owner del trato y owner del contacto editables por separado desde HUB.
+- Permisos de owner validados en frontend y backend.

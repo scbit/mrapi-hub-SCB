@@ -44,3 +44,8 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
 .ownerChoices{display:grid;gap:4px}.ownerChoice{display:flex;gap:9px;align-items:center;padding:8px;border-radius:9px;cursor:pointer}.ownerChoice:hover{background:#f6f8f6}.ownerChoice input{accent-color:#25b72b}.ownerChoice span{display:grid;min-width:0}.ownerChoice b{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ownerChoice small{font-size:10px;color:#8b95a7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ownerApply{width:100%;margin-top:8px}
 .crmEmptyActions{display:grid;gap:8px;width:100%;margin-top:12px}.createDealInline{width:100%;margin:10px 0 4px}
 @media(max-width:850px){.quickFilters{overflow-x:auto;flex-wrap:nowrap;padding-bottom:2px}.quickFilter{white-space:nowrap}.ownerPopover{position:fixed;left:12px;right:12px;top:auto;bottom:76px;max-height:55vh}}
+
+/* v1.2 stages + owner editing */
+.stageFilterInput{background:#fbfcfb!important;border-color:#dfe5dd!important}
+.crmStageEditor select{cursor:pointer}
+.crmCreateModal .stageFilterInput{margin-top:1px}

@@ -1,0 +1,31 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "deals",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "owner", "order": "ASCENDING"},
+        {"fieldPath": "stage", "order": "ASCENDING"},
+        {"fieldPath": "dueDate", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "deals",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "owner", "order": "ASCENDING"},
+        {"fieldPath": "createdAt", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "deals",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "owner", "order": "ASCENDING"},
+        {"fieldPath": "leadQuality", "order": "ASCENDING"},
+        {"fieldPath": "createdAt", "order": "ASCENDING"}
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

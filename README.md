@@ -1,102 +1,94 @@
-# MR API HUB v1.4.5
+# MR API HUB v1.5.0 — Multi-tenant SCB + AR-TEC
 
-Mi Estado operativo completo con la estructura validada del CRM legacy. Ver `docs/V1.4.4.md`.
+Esta versión elimina el bloqueo `Tenant no configurado: artec` y convierte tenant + branding en configuración reutilizable por Cloud Run.
 
-# MR API HUB v0.3
+## Presets incluidos
 
-Producto: `mrapi-hub`  
-Tenant piloto: `scb`  
-Cloud Run: `mrapi-hub-scb`
+### SCB
+`MRAPI_TENANT_ID=scb`
 
-Módulos actuales:
+Branding preset:
+- Sentire Customs Broker
+- verde / naranja
+- logo SCB
 
-- Master Login compatible con CRM SCB.
-- Bandeja paginada sobre `bsscb`.
-- HUMAN / BOT.
-- mensajes y no leídos.
-- envío WhatsApp de texto.
-- envío de PDF e imágenes.
-- plantillas aprobadas Twilio.
-- tracking de estados sin reads de búsqueda.
+### AR-TEC INVENT
+`MRAPI_TENANT_ID=artec`
 
-Ver `docs/V0.3.md` y `docs/READS-STRATEGY.md`.
+Branding preset:
+- AR-TEC INVENT
+- Investigación & Desarrollo
+- grafito / acero / plata
+- logo AR-TEC incluido
 
+## Variables mínimas por Cloud Run
 
-## v0.6
-CRM operativo: vistas guardadas, stages reordenables/ocultables/colapsables, scrollbar horizontal dentro del viewport, carga incremental global y por stage, y acciones masivas.
+```env
+MRAPI_TENANT_ID=artec
+MRAPI_CRM_DB=mrapi-hub-artec
+MRAPI_INBOX_DB=mrapi-hub-artec
+MRAPI_FILES_BUCKET=mrapi-hub-artec
+MRAPI_SESSION_SECRET=CAMBIAR_POR_SECRETO_PROPIO
+MRAPI_PUBLIC_BASE_URL=https://TU-CLOUD-RUN.run.app
+```
 
-## v1.1
+## WhatsApp / Twilio — opcional
 
-Paridad CRM ↔ HUB: archivos de trato, acceso directo a conversación y contexto de publicidad Meta/Facebook/Instagram. Ver `docs/V0.7.md` y `docs/PARITY-MATRIX.md`.
+```env
+TWILIO_ACCOUNT_SID=AC...
+TWILIO_AUTH_TOKEN=...
+TWILIO_WHATSAPP_FROM=whatsapp:+...
+```
 
+Si Twilio no está configurado o el SID no comienza con `AC`, el servicio **levanta igual**. Las operaciones WhatsApp devuelven `Twilio no configurado` en vez de matar el contenedor.
 
-## v1.1
-- Publicidad: el texto de la tarjeta queda fijado al primer mensaje inbound del lead asociado al anuncio, no al último mensaje del cliente.
-- Versión visible actualizada en `/`, CRM, Bandeja y health endpoints.
+## Dialogflow / Conversational Agent — opcional
 
+```env
+DF_PROJECT_ID=...
+DF_AGENT_ID=...
+DF_LOCATION=global
+DF_LANGUAGE_CODE=es
+```
 
-## v1.1
-- HUB 3 columnas optimizado para uso diario.
-- Usuario visible en mensajes salientes, compatible con metadata legacy.
-- Resumen CRM lateral al abrir conversación, cargado bajo demanda y cacheado en cliente.
-- Acceso directo HUB → trato CRM.
-- Responsive: panel CRM se vuelve drawer en tablet/móvil.
+La configuración queda disponible por tenant. Si no hay agent, el HUB puede operar HUMAN sin impedir el arranque.
 
+## Branding por variables — opcional
 
-## v1.1
-- Crear ticket en Desk directamente desde HUB.
-- Cambiar stage del trato desde el panel CRM lateral.
-- Ver, abrir, adjuntar y eliminar archivos del trato desde HUB.
-- Sin scans nuevos: las acciones usan IDs directos y el ticket crea escrituras directas en Desk.
+SCB y Artec ya tienen presets. Para futuros clientes se puede usar cualquier `MRAPI_TENANT_ID` y definir:
 
-## v1.1 — SCB Visual System
-- Nueva identidad visual basada en Sentire Customs Broker.
-- Header blanco, navegación unificada Bandeja / CRM / HUB / Desk.
-- Bandeja en tres paneles con KPI calculados sobre datos ya cargados (0 reads adicionales).
-- Chat y composer rediseñados; mantiene envío, adjuntos, templates, HUMAN/BOT.
-- CRM lateral rediseñado; mantiene stage, archivos y tickets Desk.
-- CRM principal re-skin sin alterar su lógica validada.
-- Home HUB rediseñada.
-- Responsive móvil con navegación inferior.
-- Logo SCB incluido como asset tenant-specific.
+```env
+MRAPI_BRAND_NAME=Cliente SA
+MRAPI_BRAND_SHORT_NAME=CLIENTE
+MRAPI_BRAND_SUBTITLE=...
+MRAPI_BRAND_LOGO_URL=https://...
+MRAPI_PRIMARY_COLOR=#4b5563
+MRAPI_PRIMARY_DARK_COLOR=#1f2937
+MRAPI_ACCENT_COLOR=#9ca3af
+```
 
-## v1.1
-Bandeja: creación contacto/trato, filtros rápidos y multi-owner con permisos.
+Si el tenant no es `scb` ni `artec`, se crea un tenant genérico en vez de tirar error.
 
-## v1.2
-- Crear trato con todas las etapas del CRM y filtro de etapas.
-- Owner del trato y owner del contacto editables por separado desde HUB.
-- Permisos de owner validados en frontend y backend.
+## Desk — opcional
 
+```env
+MRAPI_DESK_DB=...
+MRAPI_DESK_BASE_URL=https://...
+```
 
-## v1.4.5
-- Contactos completos dentro de MR API HUB.
-- Agenda Comercial con tareas manuales y vencimientos.
-- Seguimientos por Vencimiento en `/vencimientos`.
-- Owners y permisos respetados en backend.
-- Paginación y límites; no se introducen scans masivos.
-- Navegación CRM: Pipeline / Contactos / Agenda / Vencimientos.
+SCB mantiene sus defaults legacy. Otros tenants no apuntan accidentalmente a SCB Desk.
 
+## Qué cambia técnicamente
 
-## v1.4.5
-- Mi Estado Comercial portado desde CRM legacy.
-- Usuarios: alta, edición, baja, roles y Team Leader.
-- Mi Estado usa agregaciones COUNT sobre índices para evitar descargar miles de tratos.
+- `getTenant()` ya no acepta solo SCB.
+- Presets `scb` y `artec`.
+- Fallback genérico para futuros tenants.
+- Logo servido dinámicamente por `/assets/tenant-logo`.
+- Nombre, short name, subtítulo y colores inyectados en HUB / CRM / Bandeja / Contactos / Agenda / Mi Estado / Usuarios.
+- `health` muestra tenant, brand e integraciones configuradas.
+- Twilio se inicializa solo con SID válido `AC...` + token.
+- DB y bucket se siguen definiendo por variables del Cloud Run.
 
-## v1.4.5 — Mi Estado exacto
-- Replica la semántica del CRM legacy: Nuevos Prospectos y Calidad son la cohorte creada en el período; el resto de stages es stock actual; vencidos es dueDate < hoy.
-- Agregaciones COUNT cuando los índices están disponibles.
-- Si falta un índice, hace un único fallback exacto por owner (máx. 5000 docs), cacheado 60 segundos, en vez de devolver ceros falsos.
-- `firestore.indexes.json` incluye los índices recomendados para eliminar el fallback.
+## Primer usuario en un Firestore nuevo
 
-
-## v1.4.5
-- Mi Estado: Detalle rápido reutiliza el cache exacto del owner cuando faltan índices (0 reads extra si el status ya cargó).
-- Nuevos Prospectos: el detalle respeta la cohorte del período seleccionado.
-- Corrige Bueno + Excelente: ahora renderiza correctamente el porcentaje (ej. 22%).
-- Agrega índices recomendados para owner/stage/updatedAt y owner/updatedAt.
-
-
-## v1.4.5
-
-Mi Estado agrega Ayer, Esta semana y Semana pasada con rangos calendario de Buenos Aires. Ver `docs/V1.4.5.md`.
+La base nueva necesita una colección `users` con al menos un usuario admin compatible con el login actual antes de poder iniciar sesión.

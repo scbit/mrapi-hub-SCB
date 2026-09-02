@@ -6,7 +6,7 @@ const config = require("../../core/config");
 const accountSid = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
 const authToken = String(process.env.TWILIO_AUTH_TOKEN || "").trim();
 const defaultFrom = String(process.env.TWILIO_WHATSAPP_FROM || "").trim();
-const client = accountSid && authToken ? twilio(accountSid, authToken) : null;
+const client = /^AC[a-zA-Z0-9]+$/.test(accountSid) && authToken ? twilio(accountSid, authToken) : null;
 
 function ensureWhatsappPrefix(v){
   const s=String(v||"").trim();

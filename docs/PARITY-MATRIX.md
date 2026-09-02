@@ -6,7 +6,7 @@ Leyenda: ✅ portado · 🟡 parcial · ❌ pendiente · 🔄 se rediseña dentr
 
 ## Núcleo común
 
-| Función | Estado v0.7 | Nota |
+| Función | Estado v1.3 | Nota |
 |---|---:|---|
 | Master Login CRM compartido | ✅ | Una sesión para CRM/Bandeja/HUB |
 | Tenant SCB configurable | ✅ | Primer tenant del producto `mrapi-hub` |
@@ -18,7 +18,7 @@ Leyenda: ✅ portado · 🟡 parcial · ❌ pendiente · 🔄 se rediseña dentr
 
 ## CRM / Pipeline
 
-| Función | Estado v0.7 |
+| Función | Estado v1.3 |
 |---|---:|
 | Kanban | ✅ |
 | Lista | ✅ |
@@ -40,9 +40,9 @@ Leyenda: ✅ portado · 🟡 parcial · ❌ pendiente · 🔄 se rediseña dentr
 | Exportar seleccionados | ❌ |
 | Bulk vencimiento | ❌ |
 | Crear/eliminar trato desde UI | ❌ |
-| Contactos: listado/CRUD/owner/status | ❌ |
-| Agenda y tareas | ❌ |
-| Vencimientos + campañas de seguimiento | ❌ |
+| Contactos: listado/CRUD/owner/status | ✅ |
+| Agenda y tareas | ✅ |
+| Vencimientos + campañas de seguimiento | 🟡 |
 | Mi Estado comercial | ❌ |
 | KPI / objetivos / reportes | ❌ |
 | Plan de producción | ❌ |
@@ -54,7 +54,7 @@ Leyenda: ✅ portado · 🟡 parcial · ❌ pendiente · 🔄 se rediseña dentr
 
 ## HUB / CORE
 
-| Función | Estado v0.7 |
+| Función | Estado v1.3 |
 |---|---:|
 | Resolver trato → conversación directa | ✅ |
 | Abrir conversación por `conversationId` aunque no esté entre las primeras 50 | ✅ |
@@ -74,7 +74,7 @@ Leyenda: ✅ portado · 🟡 parcial · ❌ pendiente · 🔄 se rediseña dentr
 
 ## Bandeja / WhatsApp
 
-| Función | Estado v0.7 |
+| Función | Estado v1.3 |
 |---|---:|
 | Listar conversaciones paginadas | ✅ |
 | Búsqueda histórica por teléfono sin scan | ✅ |
@@ -95,3 +95,7 @@ Leyenda: ✅ portado · 🟡 parcial · ❌ pendiente · 🔄 se rediseña dentr
 ## Regla de migración
 
 No se considera una función "portada" solo porque exista una pantalla parecida. Debe conservar el comportamiento operativo necesario, permisos y una estrategia de Firestore sin scans masivos interactivos.
+
+
+### Avance v1.3
+Contactos, Agenda y Vencimientos ya están dentro del núcleo nuevo. Campañas de vencimiento siguen pendientes para el siguiente bloque.

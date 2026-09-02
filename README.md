@@ -63,3 +63,12 @@ Bandeja: creación contacto/trato, filtros rápidos y multi-owner con permisos.
 - Crear trato con todas las etapas del CRM y filtro de etapas.
 - Owner del trato y owner del contacto editables por separado desde HUB.
 - Permisos de owner validados en frontend y backend.
+
+
+## v1.3
+- Contactos completos dentro de MR API HUB.
+- Agenda Comercial con tareas manuales y vencimientos.
+- Seguimientos por Vencimiento en `/vencimientos`.
+- Owners y permisos respetados en backend.
+- Paginación y límites; no se introducen scans masivos.
+- Navegación CRM: Pipeline / Contactos / Agenda / Vencimientos.

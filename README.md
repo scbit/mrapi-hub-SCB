@@ -65,7 +65,7 @@ Bandeja: creación contacto/trato, filtros rápidos y multi-owner con permisos.
 - Permisos de owner validados en frontend y backend.
 
 
-## v1.4
+## v1.4.1
 - Contactos completos dentro de MR API HUB.
 - Agenda Comercial con tareas manuales y vencimientos.
 - Seguimientos por Vencimiento en `/vencimientos`.
@@ -74,7 +74,7 @@ Bandeja: creación contacto/trato, filtros rápidos y multi-owner con permisos.
 - Navegación CRM: Pipeline / Contactos / Agenda / Vencimientos.
 
 
-## v1.4
+## v1.4.1
 - Mi Estado Comercial portado desde CRM legacy.
 - Usuarios: alta, edición, baja, roles y Team Leader.
 - Mi Estado usa agregaciones COUNT sobre índices para evitar descargar miles de tratos.

@@ -68,10 +68,15 @@ router.get("/my-status",async(req,res)=>{try{
   return res.json({ok:true,metrics,period:range,readsEstimate,degraded:false,note:"Mi Estado exacto con agregaciones COUNT."});
 }catch(e){res.status(e.status||500).json({ok:false,error:e.message||String(e)});}});
 router.get("/my-status/deals",async(req,res)=>{try{
-  const owner=await allowedOwner(req,req.query.owner),stage=String(req.query.stage||"").trim(),limit=Math.max(1,Math.min(100,Number(req.query.limit||30)||30)),overdue=String(req.query.overdue||"")==="1",mode=String(req.query.mode||"").trim().toLowerCase();
+  const owner=await allowedOwner(req,req.query.owner);
+  const stage=String(req.query.stage||"").trim();
+  const limit=Math.max(1,Math.min(50,Number(req.query.limit||25)||25));
+  const offset=Math.max(0,Math.min(500,Number(req.query.offset||0)||0));
+  const overdue=String(req.query.overdue||"")==="1";
+  const mode=String(req.query.mode||"").trim().toLowerCase();
   const range=periodRange(req.query.period,req.query.start,req.query.end),today=todayBA();
   const cached=myStatusOwnerCache.get(owner);
-  function normalizeRows(rows){
+  function filterRows(rows){
     let out=(Array.isArray(rows)?rows:[]).slice();
     if(mode==="new"){
       const a=range.startDate?range.startDate.getTime():0,b=range.endDate?range.endDate.getTime():0;
@@ -83,10 +88,12 @@ router.get("/my-status/deals",async(req,res)=>{try{
       if(overdue)out.sort((a,b)=>String(a.dueDate||"").localeCompare(String(b.dueDate||"")));
       else out.sort((a,b)=>tsMillis(b.updatedAt)-tsMillis(a.updatedAt));
     }
-    return out.slice(0,limit).map(x=>({id:x.id,title:x.title||"",contactName:x.contactName||"",stage:x.stage||"",dueDate:x.dueDate||"",owner:x.owner||"",leadQuality:x.leadQuality||"",value:Number(x.value||0)}));
+    return out;
   }
+  function publicRow(x){return {id:x.id,title:x.title||"",contactName:x.contactName||"",company:x.company||"",stage:x.stage||"",dueDate:x.dueDate||"",owner:x.owner||"",leadQuality:qualityKey(x.leadQuality),value:Number(x.value||0),notes:String(x.notes||""),createdAt:tsMillis(x.createdAt)||0,updatedAt:tsMillis(x.updatedAt)||0};}
+  function fromRows(rows,readsEstimate,source,note){const filtered=filterRows(rows),items=filtered.slice(offset,offset+limit).map(publicRow);return res.json({ok:true,items,total:filtered.length,offset,nextOffset:offset+items.length,hasMore:offset+items.length<filtered.length,readsEstimate,source,note:note||""});}
   // Si Mi Estado ya hizo el fallback exacto, reutilizamos esa foto del owner: 0 reads.
-  if(cached&&cached.expiresAt>Date.now())return res.json({ok:true,items:normalizeRows(cached.rows),readsEstimate:0,source:"owner-cache"});
+  if(cached&&cached.expiresAt>Date.now())return fromRows(cached.rows,0,"owner-cache","Detalle servido desde cache; 0 reads adicionales.");
   try{
     let q=crmDb.collection("deals").where("owner","==",owner);
     if(mode==="new"){
@@ -97,13 +104,18 @@ router.get("/my-status/deals",async(req,res)=>{try{
       if(overdue)q=q.where("dueDate","<",today).orderBy("dueDate","asc");
       else q=q.orderBy("updatedAt","desc");
     }
-    const snap=await q.limit(limit).get();
-    return res.json({ok:true,items:snap.docs.map(d=>{const x=d.data()||{};return {id:d.id,title:x.title||"",contactName:x.contactName||"",stage:x.stage||"",dueDate:x.dueDate||"",owner:x.owner||"",leadQuality:x.leadQuality||"",value:Number(x.value||0)};}),readsEstimate:snap.size,source:"indexed-query"});
+    // Para paginar sin offset de Firestore (que cobra los saltados), pedimos solo hasta lo necesario.
+    const need=Math.min(550,offset+limit+1);
+    const snap=await q.limit(need).get();
+    const docs=snap.docs.map(d=>({id:d.id,...(d.data()||{})}));
+    const page=docs.slice(offset,offset+limit).map(publicRow);
+    return res.json({ok:true,items:page,total:null,offset,nextOffset:offset+page.length,hasMore:docs.length>offset+limit,readsEstimate:snap.size,source:"indexed-query"});
   }catch(indexError){
     if(!/index/i.test(String(indexError&&indexError.message||"")))throw indexError;
     const exact=await exactMyStatusFallback(owner,range,today);
     const cacheNow=myStatusOwnerCache.get(owner);
-    return res.json({ok:true,items:normalizeRows(cacheNow?.rows||[]),readsEstimate:exact.readsEstimate,source:exact.cached?"owner-cache":"owner-fallback",note:exact.cached?"Detalle servido desde cache, sin reads adicionales.":"Detalle servido desde el fallback exacto del owner."});
+    return fromRows(cacheNow?.rows||[],exact.readsEstimate,exact.cached?"owner-cache":"owner-fallback",exact.cached?"Detalle servido desde cache; 0 reads adicionales.":"Detalle servido desde un único fallback exacto del owner y cacheado 60 s.");
   }
 }catch(e){res.status(e.status||500).json({ok:false,error:e.message||String(e)});}});
+
 module.exports=router;

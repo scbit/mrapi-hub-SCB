@@ -65,7 +65,7 @@ Bandeja: creación contacto/trato, filtros rápidos y multi-owner con permisos.
 - Permisos de owner validados en frontend y backend.
 
 
-## v1.4.2
+## v1.4.3
 - Contactos completos dentro de MR API HUB.
 - Agenda Comercial con tareas manuales y vencimientos.
 - Seguimientos por Vencimiento en `/vencimientos`.
@@ -74,13 +74,20 @@ Bandeja: creación contacto/trato, filtros rápidos y multi-owner con permisos.
 - Navegación CRM: Pipeline / Contactos / Agenda / Vencimientos.
 
 
-## v1.4.2
+## v1.4.3
 - Mi Estado Comercial portado desde CRM legacy.
 - Usuarios: alta, edición, baja, roles y Team Leader.
 - Mi Estado usa agregaciones COUNT sobre índices para evitar descargar miles de tratos.
 
-## v1.4.2 — Mi Estado exacto
+## v1.4.3 — Mi Estado exacto
 - Replica la semántica del CRM legacy: Nuevos Prospectos y Calidad son la cohorte creada en el período; el resto de stages es stock actual; vencidos es dueDate < hoy.
 - Agregaciones COUNT cuando los índices están disponibles.
 - Si falta un índice, hace un único fallback exacto por owner (máx. 5000 docs), cacheado 60 segundos, en vez de devolver ceros falsos.
 - `firestore.indexes.json` incluye los índices recomendados para eliminar el fallback.
+
+
+## v1.4.3
+- Mi Estado: Detalle rápido reutiliza el cache exacto del owner cuando faltan índices (0 reads extra si el status ya cargó).
+- Nuevos Prospectos: el detalle respeta la cohorte del período seleccionado.
+- Corrige Bueno + Excelente: ahora renderiza correctamente el porcentaje (ej. 22%).
+- Agrega índices recomendados para owner/stage/updatedAt y owner/updatedAt.

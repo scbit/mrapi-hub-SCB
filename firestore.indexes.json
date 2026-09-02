@@ -4,26 +4,96 @@
       "collectionGroup": "deals",
       "queryScope": "COLLECTION",
       "fields": [
-        {"fieldPath": "owner", "order": "ASCENDING"},
-        {"fieldPath": "stage", "order": "ASCENDING"},
-        {"fieldPath": "dueDate", "order": "ASCENDING"}
+        {
+          "fieldPath": "owner",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "stage",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "dueDate",
+          "order": "ASCENDING"
+        }
       ]
     },
     {
       "collectionGroup": "deals",
       "queryScope": "COLLECTION",
       "fields": [
-        {"fieldPath": "owner", "order": "ASCENDING"},
-        {"fieldPath": "createdAt", "order": "ASCENDING"}
+        {
+          "fieldPath": "owner",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "ASCENDING"
+        }
       ]
     },
     {
       "collectionGroup": "deals",
       "queryScope": "COLLECTION",
       "fields": [
-        {"fieldPath": "owner", "order": "ASCENDING"},
-        {"fieldPath": "leadQuality", "order": "ASCENDING"},
-        {"fieldPath": "createdAt", "order": "ASCENDING"}
+        {
+          "fieldPath": "owner",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "leadQuality",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "deals",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "owner",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "stage",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "updatedAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "deals",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "owner",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "updatedAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "deals",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "owner",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
       ]
     }
   ],

@@ -67,5 +67,43 @@ router.get("/my-status",async(req,res)=>{try{
   metrics.nuevosProspectosVencidos=await safeCount(base.where("dueDate","<",today),"newProspectsOverdue",metricErrors);readsEstimate++;
   return res.json({ok:true,metrics,period:range,readsEstimate,degraded:false,note:"Mi Estado exacto con agregaciones COUNT."});
 }catch(e){res.status(e.status||500).json({ok:false,error:e.message||String(e)});}});
-router.get("/my-status/deals",async(req,res)=>{try{const owner=await allowedOwner(req,req.query.owner),stage=String(req.query.stage||"").trim(),limit=Math.max(1,Math.min(100,Number(req.query.limit||30)||30)),overdue=String(req.query.overdue||"")==="1";let q=crmDb.collection("deals").where("owner","==",owner);if(stage)q=q.where("stage","==",stage);if(overdue)q=q.where("dueDate","<",todayBA()).orderBy("dueDate","asc");else q=q.orderBy("updatedAt","desc");const s=await q.limit(limit).get();res.json({ok:true,items:s.docs.map(d=>{const x=d.data()||{};return {id:d.id,title:x.title||"",contactName:x.contactName||"",stage:x.stage||"",dueDate:x.dueDate||"",owner:x.owner||"",leadQuality:x.leadQuality||"",value:Number(x.value||0)};}),readsEstimate:s.size});}catch(e){res.status(500).json({ok:false,error:/index/i.test(String(e.message||""))?"Firestore requiere un índice para listar este bloque. No se hizo scan masivo.":e.message});}});
+router.get("/my-status/deals",async(req,res)=>{try{
+  const owner=await allowedOwner(req,req.query.owner),stage=String(req.query.stage||"").trim(),limit=Math.max(1,Math.min(100,Number(req.query.limit||30)||30)),overdue=String(req.query.overdue||"")==="1",mode=String(req.query.mode||"").trim().toLowerCase();
+  const range=periodRange(req.query.period,req.query.start,req.query.end),today=todayBA();
+  const cached=myStatusOwnerCache.get(owner);
+  function normalizeRows(rows){
+    let out=(Array.isArray(rows)?rows:[]).slice();
+    if(mode==="new"){
+      const a=range.startDate?range.startDate.getTime():0,b=range.endDate?range.endDate.getTime():0;
+      out=out.filter(x=>{const t=tsMillis(x.createdAt);return (!a&&!b)||(t&&t>=a&&t<b);});
+      out.sort((a,b)=>tsMillis(b.createdAt)-tsMillis(a.createdAt));
+    }else{
+      if(stage)out=out.filter(x=>String(x.stage||"").trim()===stage);
+      if(overdue)out=out.filter(x=>{const d=String(x.dueDate||"").trim();return !!d&&d<today;});
+      if(overdue)out.sort((a,b)=>String(a.dueDate||"").localeCompare(String(b.dueDate||"")));
+      else out.sort((a,b)=>tsMillis(b.updatedAt)-tsMillis(a.updatedAt));
+    }
+    return out.slice(0,limit).map(x=>({id:x.id,title:x.title||"",contactName:x.contactName||"",stage:x.stage||"",dueDate:x.dueDate||"",owner:x.owner||"",leadQuality:x.leadQuality||"",value:Number(x.value||0)}));
+  }
+  // Si Mi Estado ya hizo el fallback exacto, reutilizamos esa foto del owner: 0 reads.
+  if(cached&&cached.expiresAt>Date.now())return res.json({ok:true,items:normalizeRows(cached.rows),readsEstimate:0,source:"owner-cache"});
+  try{
+    let q=crmDb.collection("deals").where("owner","==",owner);
+    if(mode==="new"){
+      if(range.startDate&&range.endDate)q=q.where("createdAt",">=",range.startDate).where("createdAt","<",range.endDate);
+      q=q.orderBy("createdAt","desc");
+    }else{
+      if(stage)q=q.where("stage","==",stage);
+      if(overdue)q=q.where("dueDate","<",today).orderBy("dueDate","asc");
+      else q=q.orderBy("updatedAt","desc");
+    }
+    const snap=await q.limit(limit).get();
+    return res.json({ok:true,items:snap.docs.map(d=>{const x=d.data()||{};return {id:d.id,title:x.title||"",contactName:x.contactName||"",stage:x.stage||"",dueDate:x.dueDate||"",owner:x.owner||"",leadQuality:x.leadQuality||"",value:Number(x.value||0)};}),readsEstimate:snap.size,source:"indexed-query"});
+  }catch(indexError){
+    if(!/index/i.test(String(indexError&&indexError.message||"")))throw indexError;
+    const exact=await exactMyStatusFallback(owner,range,today);
+    const cacheNow=myStatusOwnerCache.get(owner);
+    return res.json({ok:true,items:normalizeRows(cacheNow?.rows||[]),readsEstimate:exact.readsEstimate,source:exact.cached?"owner-cache":"owner-fallback",note:exact.cached?"Detalle servido desde cache, sin reads adicionales.":"Detalle servido desde el fallback exacto del owner."});
+  }
+}catch(e){res.status(e.status||500).json({ok:false,error:e.message||String(e)});}});
 module.exports=router;

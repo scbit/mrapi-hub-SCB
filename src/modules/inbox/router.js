@@ -18,6 +18,32 @@ function iso(v) {
 function digits(v){ return String(v || "").replace(/\D/g, ""); }
 function cleanString(v, max=500){ return String(v || "").trim().slice(0,max); }
 function uniqueStrings(values){ return [...new Set((values || []).map(v=>cleanString(v,220)).filter(Boolean))]; }
+function deterministicConversationId(from,to){
+  const key=`${digits(from)}|${digits(to)}`;
+  return `wa_${crypto.createHash("sha256").update(key).digest("hex").slice(0,40)}`;
+}
+function twilioMedia(body){
+  const count=Math.max(0,Math.min(Number(body?.NumMedia||0)||0,10));
+  const items=[];
+  for(let i=0;i<count;i+=1){
+    const url=cleanString(body?.[`MediaUrl${i}`],1200);
+    if(!url) continue;
+    items.push({url,contentType:cleanString(body?.[`MediaContentType${i}`],160),filename:"",source:"twilio"});
+  }
+  return items;
+}
+function referralFromTwilio(body){
+  const ctwa=cleanString(body?.ReferralCtwaClid,300);
+  const sourceId=cleanString(body?.ReferralSourceId,300);
+  const sourceType=cleanString(body?.ReferralSourceType,120);
+  const headline=cleanString(body?.ReferralHeadline,500);
+  const refBody=cleanString(body?.ReferralBody,1200);
+  const image=cleanString(body?.ReferralMediaUrl,1200);
+  const sourceUrl=cleanString(body?.ReferralSourceUrl,1200);
+  const has=!!(ctwa||sourceId||sourceType||headline||refBody||image||sourceUrl);
+  return {has,ctwa,sourceId,sourceType,headline,body:refBody,image,sourceUrl};
+}
+function twimlEmpty(res){ return res.status(200).type("text/xml").send("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response></Response>"); }
 function summary(doc){
   const d = doc.data() || {};
   return {
@@ -292,6 +318,65 @@ router.post("/conversations/:id/send-template",authRequired,async(req,res)=>{
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human-template",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],template:{contentSid,contentVariables},deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
     await updateAfterSend(c.ref,text,0,sent.status); return res.json({ok:true,sid:sent.sid,contentSid,readsEstimate:1,writesEstimate:2});
   }catch(e){console.error("send-template",e);return res.status(e.status||500).json({ok:false,error:e.message});}
+});
+
+router.post("/twilio/inbound",async(req,res)=>{
+  try{
+    const validation=wa.validateInboundWebhook(req);
+    if(!validation.ok){
+      console.warn("twilio-inbound rejected",validation.reason,validation.url||"");
+      return res.status(validation.reason?.includes("no configurado")?503:403).type("text/plain").send(validation.reason||"Webhook inválido");
+    }
+    const sid=cleanString(req.body?.MessageSid||req.body?.SmsMessageSid,120);
+    const from=wa.ensureWhatsappPrefix(cleanString(req.body?.From,120));
+    const to=wa.ensureWhatsappPrefix(cleanString(req.body?.To,120));
+    const body=cleanString(req.body?.Body,4000);
+    const profileName=cleanString(req.body?.ProfileName,220);
+    const waId=cleanString(req.body?.WaId,80);
+    const media=twilioMedia(req.body||{});
+    const referral=referralFromTwilio(req.body||{});
+    if(!sid||!from||!to){
+      console.warn("twilio-inbound missing fields",{sid:!!sid,from:!!from,to:!!to});
+      return twimlEmpty(res);
+    }
+    const conversationId=deterministicConversationId(from,to);
+    const convoRef=inboxDb.collection("conversations").doc(conversationId);
+    const msgRef=convoRef.collection("messages").doc(sid);
+    let duplicate=false;
+    await inboxDb.runTransaction(async tx=>{
+      const [convoSnap,msgSnap]=await Promise.all([tx.get(convoRef),tx.get(msgRef)]);
+      if(msgSnap.exists){ duplicate=true; return; }
+      const now=FieldValue.serverTimestamp();
+      const msgData={
+        direction:"IN",source:"twilio",body,text:body,from,to,timestamp:now,createdAt:now,status:"received",deliveryStatus:"received",
+        messageSid:sid,sid,waId,numMedia:media.length,media,profileName,
+        sourceChannel:referral.has?"meta_ad":"whatsapp",
+        referralCtwaClid:referral.ctwa,referralAdId:referral.sourceId,referralSourceType:referral.sourceType,
+        referralHeadline:referral.headline,referralBody:referral.body,referralImageUrl:referral.image,referralSourceUrl:referral.sourceUrl
+      };
+      tx.set(msgRef,msgData,{merge:false});
+      const patch={
+        waFrom:from,inboundTo:to,lineId:to,profileName,contactName:convoSnap.exists?undefined:(profileName||wa.cleanWhatsappNumber(from)),
+        lastMessageAt:now,lastInboundMessageAt:now,updatedAt:now,lastMessagePreview:preview(body,media.length),lastMessageDirection:"IN",
+        hasUnread:true,unreadCount:FieldValue.increment(1),lastDeliveryStatus:"received",sourceChannel:referral.has?"meta_ad":"whatsapp"
+      };
+      Object.keys(patch).forEach(k=>patch[k]===undefined&&delete patch[k]);
+      if(!convoSnap.exists){
+        patch.createdAt=now;patch.mode=config.dfAgentId?"BOT":"HUMAN";patch.stage="nuevo";patch.ownerEmail="";patch.isAssigned=false;patch.isLinked=false;
+      }
+      if(referral.has){
+        patch.leadPlatform="meta";patch.referralCtwaClid=referral.ctwa;patch.referralAdId=referral.sourceId;patch.referralSourceType=referral.sourceType;
+        patch.referralHeadline=referral.headline;patch.referralBody=referral.body;patch.referralImageUrl=referral.image;patch.referralSourceUrl=referral.sourceUrl;
+      }
+      tx.set(convoRef,patch,{merge:true});
+    });
+    console.log(JSON.stringify({severity:"INFO",message:"Twilio inbound",tenant:config.tenantId,conversationId,messageSid:sid,duplicate,from,to,numMedia:media.length,referral:referral.has}));
+    return twimlEmpty(res);
+  }catch(e){
+    console.error("twilio-inbound",e);
+    // Twilio should receive 200 for a handled webhook error only if it was already persisted.
+    return res.status(500).type("text/plain").send("Inbound error");
+  }
 });
 
 router.post("/twilio/status",express.urlencoded({extended:false}),async(req,res)=>{

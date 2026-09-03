@@ -30,7 +30,7 @@ async function sendText({from,to,body,mediaUrls=[],req,conversationId}){
 }
 async function sendTemplate({from,to,contentSid,contentVariables={},req,conversationId}){
   assertConfigured();
-  const payload={from:ensureWhatsappPrefix(from||defaultFrom),to:ensureWhatsappPrefix(to),contentSid:String(contentSid||"").trim(),statusCallback:statusCallback(req)};
+  const payload={from:ensureWhatsappPrefix(from||defaultFrom),to:ensureWhatsappPrefix(to),contentSid:String(contentSid||"").trim(),statusCallback:statusCallback(req,conversationId)};
   if(contentVariables && Object.keys(contentVariables).length) payload.contentVariables=JSON.stringify(contentVariables);
   return client.messages.create(payload);
 }
@@ -59,4 +59,17 @@ async function listApprovedTemplates(){
   const r=await axios.get("https://content.twilio.com/v1/ContentAndApprovals",{auth:{username:accountSid,password:authToken},timeout:20000});
   return (r.data?.contents||[]).map(item=>({sid:item.sid,name:item.friendly_name||item.friendlyName||item.sid,language:item.language||item.locale||"",category:templateCategory(item),whatsappStatus:approvalStatus(item)})).filter(x=>x.whatsappStatus==="approved").sort((a,b)=>a.name.localeCompare(b.name,"es",{sensitivity:"base"}));
 }
-module.exports={client,defaultFrom,ensureWhatsappPrefix,cleanWhatsappNumber,sendText,sendTemplate,listApprovedTemplates};
+
+function inboundWebhookUrl(req){
+  const base=(config.publicBaseUrl || `${req.protocol}://${req.get("host")}`).replace(/\/$/,"");
+  return `${base}/api/inbox/twilio/inbound`;
+}
+function validateInboundWebhook(req){
+  if(!authToken) return {ok:false,reason:"TWILIO_AUTH_TOKEN no configurado"};
+  const signature=String(req.get("x-twilio-signature")||"").trim();
+  if(!signature) return {ok:false,reason:"Falta X-Twilio-Signature"};
+  const url=inboundWebhookUrl(req);
+  const ok=twilio.validateRequest(authToken,signature,url,req.body||{});
+  return {ok,url,reason:ok?"":"Firma Twilio inválida"};
+}
+module.exports={client,defaultFrom,ensureWhatsappPrefix,cleanWhatsappNumber,sendText,sendTemplate,listApprovedTemplates,validateInboundWebhook,inboundWebhookUrl};

@@ -1,4 +1,4 @@
-# MR API HUB v1.5.0 — Multi-tenant SCB + AR-TEC
+# MR API HUB v1.5.1 — Multi-tenant + WhatsApp inbound
 
 Esta versión elimina el bloqueo `Tenant no configurado: artec` y convierte tenant + branding en configuración reutilizable por Cloud Run.
 
@@ -92,3 +92,21 @@ SCB mantiene sus defaults legacy. Otros tenants no apuntan accidentalmente a SCB
 ## Primer usuario en un Firestore nuevo
 
 La base nueva necesita una colección `users` con al menos un usuario admin compatible con el login actual antes de poder iniciar sesión.
+
+
+## WhatsApp Twilio inbound — v1.5.1
+
+MR API HUB now supports inbound WhatsApp for each tenant. Configure the WhatsApp Sender in Twilio with:
+
+- **When a message comes in:** `${MRAPI_PUBLIC_BASE_URL}/api/inbox/twilio/inbound`
+- **Method:** `POST`
+
+Example AR-TEC:
+
+`https://mrapi-hub-artec-invent-604957912671.us-central1.run.app/api/inbox/twilio/inbound`
+
+The webhook validates `X-Twilio-Signature`, stores inbound messages idempotently by `MessageSid`, maintains one conversation per customer + receiving line, increments unread counts, and preserves Meta/Click-to-WhatsApp referral fields when Twilio sends them.
+
+Outbound text, media and approved templates continue using the existing Twilio credentials. Template status callbacks now include the conversation id.
+
+New conversations default to HUMAN when Dialogflow is not configured; when `DF_AGENT_ID` exists they default to BOT.

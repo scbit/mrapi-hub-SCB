@@ -19,3 +19,15 @@ La ruta histórica de búsqueda contiene un fallback que puede leer hasta 15.000
 ## Objetivo Bandeja
 
 Una página de 50 conversaciones debe costar aproximadamente 50 reads (+1 si se resuelve cursor por ID). La metadata requerida para pintar la fila debe estar materializada en el documento resumen de conversación.
+
+## Inbox Live v1.5.3
+
+La Bandeja no vuelve a leer las primeras 50 conversaciones cada 2 segundos.
+Usa dos consultas incrementales:
+
+- `conversations`: `lastMessageAt >= checkpoint`, máximo 100 cambios.
+- chat abierto: `messages.timestamp >= checkpoint`, máximo 100 cambios.
+
+El checkpoint tiene 1 segundo de solapamiento y el frontend deduplica por ID / MessageSid.
+La sincronización se pausa cuando la pestaña está oculta y hace catch-up al volver.
+Con filtro de owner se usa índice compuesto `ownerEmail + lastMessageAt DESC`.

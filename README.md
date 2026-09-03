@@ -1,4 +1,4 @@
-# MR API HUB v1.5.2 — Multi-tenant + WhatsApp inbound
+# MR API HUB v1.5.3 — Multi-tenant + WhatsApp inbound
 
 Esta versión elimina el bloqueo `Tenant no configurado: artec` y convierte tenant + branding en configuración reutilizable por Cloud Run.
 
@@ -94,7 +94,7 @@ SCB mantiene sus defaults legacy. Otros tenants no apuntan accidentalmente a SCB
 La base nueva necesita una colección `users` con al menos un usuario admin compatible con el login actual antes de poder iniciar sesión.
 
 
-## WhatsApp Twilio inbound — v1.5.2
+## WhatsApp Twilio inbound — v1.5.3
 
 MR API HUB now supports inbound WhatsApp for each tenant. Configure the WhatsApp Sender in Twilio with:
 
@@ -111,7 +111,7 @@ Outbound text, media and approved templates continue using the existing Twilio c
 
 New conversations default to HUMAN when Dialogflow is not configured; when `DF_AGENT_ID` exists they default to BOT.
 
-## v1.5.2 — BOT Conversational Agent multi-tenant
+## v1.5.3 — BOT Conversational Agent multi-tenant
 
 Cuando una conversación está en `BOT` y están configuradas `DF_PROJECT_ID`, `DF_AGENT_ID`, `DF_LOCATION` y `DF_LANGUAGE_CODE`, cada mensaje entrante de Twilio se envía al Conversational Agent del tenant mediante Dialogflow CX `detectIntent`.
 
@@ -121,3 +121,14 @@ Cuando una conversación está en `BOT` y están configuradas `DF_PROJECT_ID`, `
 - Si el usuario cambia el chat a `HUMAN` mientras el agente procesa, la respuesta automática se descarta.
 - Si Conversational Agents falla o supera timeout, el mensaje entrante permanece guardado y la conversación pasa automáticamente a `HUMAN`.
 - Los tenants sin `DF_*` siguen funcionando normalmente.
+
+
+## v1.5.3 — Inbox Live
+
+- Polling incremental cada 2 segundos, solo mientras la pestaña está visible.
+- Conversaciones nuevas aparecen arriba automáticamente.
+- Un chat existente sube al recibir o enviar un mensaje.
+- El chat abierto trae solo mensajes posteriores al checkpoint.
+- No recarga las primeras 50 conversaciones en cada ciclo.
+- Al volver a una pestaña oculta hace una sincronización inmediata con pequeño solapamiento para evitar perder eventos.
+- Respeta filtros de owner y permisos del backend.

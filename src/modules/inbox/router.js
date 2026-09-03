@@ -202,6 +202,35 @@ router.get("/conversations", authRequired, async(req,res)=>{
   }
 });
 
+
+router.get("/conversations/changes", authRequired, async(req,res)=>{
+  try{
+    const sinceRaw=cleanString(req.query.since,80);
+    const sinceDate=new Date(sinceRaw);
+    if(!sinceRaw || Number.isNaN(sinceDate.getTime())) return res.status(400).json({ok:false,error:"Checkpoint inválido"});
+    const requestedOwners=uniqueStrings(String(req.query.owners||"").split(",").map(x=>String(x||"").toLowerCase())).slice(0,10);
+    const visible=await visibleOwners(req.authUser);
+    let owners=requestedOwners;
+    if(visible!==null){
+      if(owners.some(x=>!visible.includes(x))) return res.status(403).json({ok:false,error:"Owner fuera de tus permisos"});
+      if(!owners.length){
+        const own=String(req.authUser?.email||"").trim().toLowerCase();
+        owners=visible.length>10?(own&&visible.includes(own)?[own]:visible.slice(0,10)):visible.slice(0,10);
+      }
+    }
+    let q=inboxDb.collection("conversations");
+    if(owners.length===1) q=q.where("ownerEmail","==",owners[0]);
+    else if(owners.length>1) q=q.where("ownerEmail","in",owners);
+    q=q.where("lastMessageAt",">=",sinceDate).orderBy("lastMessageAt","desc").limit(100);
+    const snap=await q.get();
+    return res.json({ok:true,items:snap.docs.map(summary),readsEstimate:snap.size,serverNow:new Date().toISOString(),ownersApplied:owners});
+  }catch(e){
+    console.error("inbox changes",e);
+    const msg=/index/i.test(String(e.message||""))?"Firestore requiere un índice para Inbox Live con este filtro de owner. No se hizo scan masivo.":e.message;
+    return res.status(500).json({ok:false,error:msg});
+  }
+});
+
 router.get("/conversations/search",authRequired,async(req,res)=>{
   try{
     const raw=cleanString(req.query.q,120); const phone=digits(raw);
@@ -288,6 +317,19 @@ router.get("/conversations/:id/messages",authRequired,async(req,res)=>{
     dedup.sort((a,b)=>String(a.timestamp||"").localeCompare(String(b.timestamp||"")));
     return res.json({ok:true,items:dedup,readsEstimate:reads,relatedConversations:related.length});
   }catch(e){ console.error("inbox messages",e); return res.status(500).json({ok:false,error:e.message}); }
+});
+
+
+router.get("/conversations/:id/messages/changes",authRequired,async(req,res)=>{
+  try{
+    const id=cleanString(decodeURIComponent(req.params.id||""),220);
+    const sinceRaw=cleanString(req.query.since,80); const sinceDate=new Date(sinceRaw);
+    if(!id) return res.status(400).json({ok:false,error:"Conversación inválida"});
+    if(!sinceRaw || Number.isNaN(sinceDate.getTime())) return res.status(400).json({ok:false,error:"Checkpoint inválido"});
+    const snap=await inboxDb.collection("conversations").doc(id).collection("messages")
+      .where("timestamp",">=",sinceDate).orderBy("timestamp","asc").limit(100).get();
+    return res.json({ok:true,items:snap.docs.map(d=>message(d,id)),readsEstimate:snap.size,serverNow:new Date().toISOString()});
+  }catch(e){ console.error("inbox message changes",e); return res.status(500).json({ok:false,error:e.message}); }
 });
 
 router.post("/conversations/:id/mode",authRequired,async(req,res)=>{

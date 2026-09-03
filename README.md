@@ -1,4 +1,4 @@
-# MR API HUB v1.5.1 — Multi-tenant + WhatsApp inbound
+# MR API HUB v1.5.2 — Multi-tenant + WhatsApp inbound
 
 Esta versión elimina el bloqueo `Tenant no configurado: artec` y convierte tenant + branding en configuración reutilizable por Cloud Run.
 
@@ -94,7 +94,7 @@ SCB mantiene sus defaults legacy. Otros tenants no apuntan accidentalmente a SCB
 La base nueva necesita una colección `users` con al menos un usuario admin compatible con el login actual antes de poder iniciar sesión.
 
 
-## WhatsApp Twilio inbound — v1.5.1
+## WhatsApp Twilio inbound — v1.5.2
 
 MR API HUB now supports inbound WhatsApp for each tenant. Configure the WhatsApp Sender in Twilio with:
 
@@ -110,3 +110,14 @@ The webhook validates `X-Twilio-Signature`, stores inbound messages idempotently
 Outbound text, media and approved templates continue using the existing Twilio credentials. Template status callbacks now include the conversation id.
 
 New conversations default to HUMAN when Dialogflow is not configured; when `DF_AGENT_ID` exists they default to BOT.
+
+## v1.5.2 — BOT Conversational Agent multi-tenant
+
+Cuando una conversación está en `BOT` y están configuradas `DF_PROJECT_ID`, `DF_AGENT_ID`, `DF_LOCATION` y `DF_LANGUAGE_CODE`, cada mensaje entrante de Twilio se envía al Conversational Agent del tenant mediante Dialogflow CX `detectIntent`.
+
+- Sesión estable por conversación para conservar contexto.
+- La respuesta del agente se envía por el mismo número Twilio que recibió el mensaje.
+- La respuesta se guarda en `conversations/{id}/messages` con `source=dialogflow`.
+- Si el usuario cambia el chat a `HUMAN` mientras el agente procesa, la respuesta automática se descarta.
+- Si Conversational Agents falla o supera timeout, el mensaje entrante permanece guardado y la conversación pasa automáticamente a `HUMAN`.
+- Los tenants sin `DF_*` siguen funcionando normalmente.

@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const config = require("../../core/config");
 const { inboxDb, crmDb, deskDb, admin, storage } = require("../../core/google");
 const wa = require("./whatsapp");
+const dialogflow = require("./dialogflow");
 const { authRequired } = require("../../middleware/auth");
 const router = express.Router();
 const FieldValue = admin.firestore.FieldValue;
@@ -44,6 +45,29 @@ function referralFromTwilio(body){
   return {has,ctwa,sourceId,sourceType,headline,body:refBody,image,sourceUrl};
 }
 function twimlEmpty(res){ return res.status(200).type("text/xml").send("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response></Response>"); }
+async function processBotInbound({conversationId,convoRef,from,to,body,inboundSid}){
+  if(!dialogflow.configured() || !String(body||"").trim()) return {skipped:true};
+  try{
+    const detected=await dialogflow.detectIntent({conversationId,text:body});
+    if(!detected.text) return {ok:true,skipped:true,reason:"empty_agent_response"};
+    // A human may take over while Dialogflow is processing. Never send if mode changed.
+    const latest=await convoRef.get();
+    if(!latest.exists || normalizeMode((latest.data()||{}).mode)!=="BOT") return {ok:true,skipped:true,reason:"mode_changed_to_human"};
+    const sent=await wa.sendText({from:to,to:from,body:detected.text,conversationId,req:{protocol:"https",get:()=>""}});
+    const now=FieldValue.serverTimestamp();
+    await convoRef.collection("messages").doc(String(sent.sid)).set({
+      direction:"OUT",source:"dialogflow",body:detected.text,text:detected.text,from:wa.ensureWhatsappPrefix(to),to:wa.ensureWhatsappPrefix(from),
+      timestamp:now,createdAt:now,status:sent.status||"queued",deliveryStatus:sent.status||"queued",messageSid:sent.sid,sid:sent.sid,numMedia:0,media:[],
+      sentBy:"BOT",sentByName:"BOT",sentByEmail:"",sentByUserId:"",senderName:"BOT",bot:true,dialogflowSessionId:detected.sessionId,inReplyToMessageSid:inboundSid
+    },{merge:false});
+    await convoRef.set({lastMessageAt:now,lastBotMessageAt:now,updatedAt:now,lastMessagePreview:preview(detected.text,0),lastMessageDirection:"OUT",lastDeliveryStatus:sent.status||"queued",botLastError:"",botLastErrorAt:null},{merge:true});
+    return {ok:true,sid:sent.sid,text:detected.text};
+  }catch(error){
+    console.error("dialogflow bot inbound",error?.response?.data || error);
+    await convoRef.set({mode:"HUMAN",modeUpdatedAt:FieldValue.serverTimestamp(),modeUpdatedBy:"system:dialogflow-fallback",botLastError:cleanString(error?.response?.data?.error?.message || error?.message || "Dialogflow error",1000),botLastErrorAt:FieldValue.serverTimestamp()},{merge:true});
+    return {ok:false,error:error?.message||"Dialogflow error",fallbackHuman:true};
+  }
+}
 function summary(doc){
   const d = doc.data() || {};
   return {
@@ -343,6 +367,7 @@ router.post("/twilio/inbound",async(req,res)=>{
     const convoRef=inboxDb.collection("conversations").doc(conversationId);
     const msgRef=convoRef.collection("messages").doc(sid);
     let duplicate=false;
+    let shouldBot=false;
     await inboxDb.runTransaction(async tx=>{
       const [convoSnap,msgSnap]=await Promise.all([tx.get(convoRef),tx.get(msgRef)]);
       if(msgSnap.exists){ duplicate=true; return; }
@@ -361,8 +386,10 @@ router.post("/twilio/inbound",async(req,res)=>{
         hasUnread:true,unreadCount:FieldValue.increment(1),lastDeliveryStatus:"received",sourceChannel:referral.has?"meta_ad":"whatsapp"
       };
       Object.keys(patch).forEach(k=>patch[k]===undefined&&delete patch[k]);
+      const currentMode=convoSnap.exists ? normalizeMode((convoSnap.data()||{}).mode) : (dialogflow.configured()?"BOT":"HUMAN");
+      shouldBot=currentMode==="BOT";
       if(!convoSnap.exists){
-        patch.createdAt=now;patch.mode=config.dfAgentId?"BOT":"HUMAN";patch.stage="nuevo";patch.ownerEmail="";patch.isAssigned=false;patch.isLinked=false;
+        patch.createdAt=now;patch.mode=currentMode;patch.stage="nuevo";patch.ownerEmail="";patch.isAssigned=false;patch.isLinked=false;
       }
       if(referral.has){
         patch.leadPlatform="meta";patch.referralCtwaClid=referral.ctwa;patch.referralAdId=referral.sourceId;patch.referralSourceType=referral.sourceType;
@@ -370,7 +397,11 @@ router.post("/twilio/inbound",async(req,res)=>{
       }
       tx.set(convoRef,patch,{merge:true});
     });
-    console.log(JSON.stringify({severity:"INFO",message:"Twilio inbound",tenant:config.tenantId,conversationId,messageSid:sid,duplicate,from,to,numMedia:media.length,referral:referral.has}));
+    let botResult={skipped:true};
+    if(!duplicate && shouldBot){
+      botResult=await processBotInbound({conversationId,convoRef,from,to,body,inboundSid:sid});
+    }
+    console.log(JSON.stringify({severity:"INFO",message:"Twilio inbound",tenant:config.tenantId,conversationId,messageSid:sid,duplicate,from,to,numMedia:media.length,referral:referral.has,shouldBot,botOk:botResult?.ok===true,botFallbackHuman:botResult?.fallbackHuman===true}));
     return twimlEmpty(res);
   }catch(e){
     console.error("twilio-inbound",e);

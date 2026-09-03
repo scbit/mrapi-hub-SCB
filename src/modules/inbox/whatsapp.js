@@ -15,7 +15,9 @@ function ensureWhatsappPrefix(v){
 }
 function cleanWhatsappNumber(v){ return String(v||"").replace(/^whatsapp:/i,"").trim(); }
 function statusCallback(req, conversationId){
-  const base=(config.publicBaseUrl || `${req.protocol}://${req.get("host")}`).replace(/\/$/,"");
+  const host=req && typeof req.get==="function" ? String(req.get("host")||"") : "";
+  const protocol=req?.protocol || "https";
+  const base=(config.publicBaseUrl || (host?`${protocol}://${host}`:"")).replace(/\/$/,"");
   const q=conversationId ? `?conversationId=${encodeURIComponent(conversationId)}` : "";
   return `${base}/api/inbox/twilio/status${q}`;
 }
@@ -61,7 +63,9 @@ async function listApprovedTemplates(){
 }
 
 function inboundWebhookUrl(req){
-  const base=(config.publicBaseUrl || `${req.protocol}://${req.get("host")}`).replace(/\/$/,"");
+  const host=req && typeof req.get==="function" ? String(req.get("host")||"") : "";
+  const protocol=req?.protocol || "https";
+  const base=(config.publicBaseUrl || (host?`${protocol}://${host}`:"")).replace(/\/$/,"");
   return `${base}/api/inbox/twilio/inbound`;
 }
 function validateInboundWebhook(req){

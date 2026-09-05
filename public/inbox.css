@@ -50,7 +50,7 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
 .crmStageEditor select{cursor:pointer}
 .crmCreateModal .stageFilterInput{margin-top:1px}
 
-/* v1.5.4 — media, smart scroll & multi-line */
+/* v1.5.5 — media, smart scroll & multi-line */
 .chat{position:relative}
 .lineManageBtn{display:inline-flex;align-items:center;gap:5px;margin-top:5px;padding:3px 8px;border:1px solid #d7dde3;border-radius:999px;background:#fff;color:#586069;font:inherit;font-size:10px;font-weight:800;cursor:pointer}
 .lineManageBtn:hover{border-color:var(--scb-green,#57b530);color:#111827}
@@ -67,3 +67,7 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
 .lineRow{display:flex;align-items:center;justify-content:space-between;gap:15px;padding:13px 4px;border-bottom:1px solid #edf0f2}.lineRow>div{display:grid;gap:3px}.lineRow>div span{font-size:10px;color:#899399}.lineRow label{display:flex;align-items:center;gap:7px;font-size:11px;color:#4b5563;cursor:pointer}.lineRow input{accent-color:var(--scb-green,#57b530)}
 .lineModalFoot{display:flex;justify-content:flex-end;gap:8px;padding:13px 16px;border-top:1px solid #e6eaed;background:#fafbfb}
 @media(max-width:850px){.newMsgBadge{right:14px;bottom:122px}.lineModalBack{padding:0;align-items:flex-end}.lineModal{width:100vw;max-height:78vh;border-radius:18px 18px 0 0}.lineRow{align-items:flex-start;flex-direction:column}.chatAudio{width:72vw}.chatImage{max-width:72vw}}
+
+/* v1.5.5 owner search + explicit media downloads */
+.ownerSearchWrap{padding:0 2px 8px}.ownerSearchInput{width:100%;height:36px;border:1px solid #d9dee7;border-radius:10px;background:#f8fafc;padding:0 11px;font:inherit;font-size:12px;outline:none}.ownerSearchInput:focus{border-color:var(--tenant-primary,#55b936);box-shadow:0 0 0 3px rgba(85,185,54,.10);background:#fff}.ownerEmpty{padding:14px 10px;text-align:center;color:#8b95a7;font-size:12px}.mediaResolved{display:grid;gap:6px;width:max-content;max-width:100%}.mediaResolvedFile{grid-template-columns:minmax(0,1fr) auto;align-items:center;width:100%}.mediaDownload{display:inline-flex;align-items:center;justify-content:center;width:max-content;max-width:100%;padding:6px 9px;border-radius:8px;border:1px solid rgba(148,163,184,.42);background:rgba(255,255,255,.82);color:inherit;text-decoration:none;font-size:11px;font-weight:700;cursor:pointer}.mediaDownload:hover{background:#fff}.out .mediaDownload{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.28)}
+@media(max-width:850px){.mediaResolvedFile{grid-template-columns:1fr}.mediaDownload{min-height:34px}}

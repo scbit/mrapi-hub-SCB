@@ -1,8 +1,8 @@
-# MR API HUB v1.5.4
+# MR API HUB v1.5.5
 
 **Base:** v1.5.3 Inbox Live.
 
-### Novedades v1.5.4
+### Novedades v1.5.5
 - Audios, PDFs, imágenes y adjuntos visibles/abribles desde la Bandeja.
 - Cache de media entrante en el bucket del tenant al primer acceso.
 - Scroll inteligente: no vuelve abajo si el usuario está leyendo historial.
@@ -10,7 +10,7 @@
 - Administración de múltiples líneas por contacto: descubrir, vincular y elegir línea de respuesta.
 - Mismo código multi-tenant para SCB, Ar-Tec y futuros clientes.
 
-Ver `docs/V1.5.4.md`.
+Ver `docs/V1.5.5.md`.
 
 # MR API HUB v1.5.3 — Multi-tenant + WhatsApp inbound
 

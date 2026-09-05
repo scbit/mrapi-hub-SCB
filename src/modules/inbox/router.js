@@ -371,6 +371,20 @@ router.get("/conversations/:id/messages/:messageId/media/:index",authRequired,as
     const result=await materializeMedia(id,messageId,index); return res.json({ok:true,url:result.url,media:{filename:result.item.filename||"",contentType:result.item.contentType||""},readsEstimate:result.reads,writesEstimate:result.writes});
   }catch(e){console.error("resolve media",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });
+router.get("/conversations/:id/messages/:messageId/media/:index/download",authRequired,async(req,res)=>{
+  try{
+    const id=cleanString(decodeURIComponent(req.params.id||""),220), messageId=cleanString(decodeURIComponent(req.params.messageId||""),180), index=Math.max(0,Math.min(Number(req.params.index||0)||0,9));
+    const result=await materializeMedia(id,messageId,index);
+    if(!result.item?.gcsPath || !config.filesBucket) return res.redirect(result.url);
+    const filename=String(result.item.filename||`archivo${mediaExtension(result.item.contentType)}`).replace(/[\r\n\"]/g,"_");
+    res.setHeader("Content-Type",result.item.contentType||"application/octet-stream");
+    res.setHeader("Content-Disposition",`attachment; filename="${filename}"`);
+    res.setHeader("Cache-Control","private, max-age=60");
+    const stream=storage.bucket(config.filesBucket).file(result.item.gcsPath).createReadStream();
+    stream.on("error",err=>{console.error("download media stream",err);if(!res.headersSent)res.status(500).end("No se pudo descargar el archivo");else res.destroy(err)});
+    stream.pipe(res);
+  }catch(e){console.error("download media",e);return res.status(e.status||500).send(e.message||"No se pudo descargar el archivo");}
+});
 
 router.get("/conversations/:id/messages",authRequired,async(req,res)=>{
   try{

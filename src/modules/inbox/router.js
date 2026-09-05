@@ -79,6 +79,8 @@ function summary(doc){
     waFrom: d.waFrom || "",
     inboundTo: d.inboundTo || "",
     lineId: d.lineId || d.inboundTo || "",
+    preferredLineId: d.preferredLineId || "",
+    linkedLineIds: uniqueStrings(d.linkedLineIds || []),
     ownerEmail: String(d.ownerEmail || "").toLowerCase(),
     isAssigned: Boolean(String(d.ownerEmail || "").trim()),
     isLinked: Boolean(String(d.dealId || "").trim() || String(d.contactId || "").trim()),
@@ -117,7 +119,7 @@ function message(doc, conversationId){
     status: d.status || d.deliveryStatus || "",
     messageSid: d.messageSid || d.sid || "",
     media: Array.isArray(d.media) ? d.media.map(m=>({
-      url: m?.url || "", contentType: m?.contentType || m?.mimeType || "", filename: m?.filename || ""
+      url: m?.url || "", contentType: m?.contentType || m?.mimeType || "", filename: m?.filename || "", gcsPath: m?.gcsPath || "", source: m?.source || ""
     })) : [],
     template: d.template || null,
     referralCtwaClid: d.referralCtwaClid || d.payload?.referralCtwaClid || "",
@@ -167,6 +169,40 @@ async function uploadOutbound(file){
   const [signedUrl]=await obj.getSignedUrl({action:"read",expires:Date.now()+60*60*1000});
   return {url:signedUrl,gcsPath:path,filename:file.originalname,contentType:file.mimetype,source:"gcs"};
 }
+function mediaExtension(contentType){
+  const ct=String(contentType||"").toLowerCase();
+  if(ct.includes("pdf")) return ".pdf"; if(ct.includes("ogg")) return ".ogg"; if(ct.includes("mpeg")) return ".mp3";
+  if(ct.includes("mp4")) return ".mp4"; if(ct.includes("webm")) return ".webm"; if(ct.includes("jpeg")) return ".jpg";
+  if(ct.includes("png")) return ".png"; if(ct.includes("webp")) return ".webp"; return "";
+}
+function filenameFromDisposition(value){
+  const m=String(value||"").match(/filename\*?=(?:UTF-8''|["']?)([^"';]+)/i);
+  if(!m) return ""; try{return decodeURIComponent(m[1].replace(/["']/g,""));}catch{return m[1].replace(/["']/g,"");}
+}
+async function signedMediaUrl(media){
+  if(!media?.gcsPath || !config.filesBucket) return "";
+  const [url]=await storage.bucket(config.filesBucket).file(media.gcsPath).getSignedUrl({action:"read",expires:Date.now()+60*60*1000});
+  return url;
+}
+async function materializeMedia(conversationId,messageId,index){
+  const msgRef=inboxDb.collection("conversations").doc(conversationId).collection("messages").doc(messageId);
+  const snap=await msgRef.get(); if(!snap.exists){const e=new Error("Mensaje no encontrado");e.status=404;throw e;}
+  const data=snap.data()||{}; const media=Array.isArray(data.media)?data.media.slice():[]; const item=media[index];
+  if(!item){const e=new Error("Adjunto no encontrado");e.status=404;throw e;}
+  if(item.gcsPath){ return {url:await signedMediaUrl(item),item,reads:1,writes:0}; }
+  if(!item.url){const e=new Error("El adjunto no tiene URL disponible");e.status=404;throw e;}
+  if(!config.filesBucket){const e=new Error("MRAPI_FILES_BUCKET no configurado");e.status=503;throw e;}
+  const downloaded=await wa.downloadMedia(item.url);
+  const contentType=String(item.contentType||downloaded.contentType||"application/octet-stream");
+  const fallbackName=`${messageId}-${index}${mediaExtension(contentType)}`;
+  const filename=String(item.filename||filenameFromDisposition(downloaded.contentDisposition)||fallbackName).replace(/[^a-zA-Z0-9._-]+/g,"_").slice(-120);
+  const path=`whatsapp-in/${conversationId}/${Date.now()}-${crypto.randomBytes(6).toString("hex")}-${filename}`;
+  await storage.bucket(config.filesBucket).file(path).save(downloaded.buffer,{contentType,resumable:false,metadata:{cacheControl:"private, max-age=3600"}});
+  media[index]={...item,gcsPath:path,filename,contentType,source:"gcs",originalTwilioUrl:item.url};
+  await msgRef.set({media},{merge:true});
+  return {url:await signedMediaUrl(media[index]),item:media[index],reads:1,writes:1};
+}
+
 router.get("/conversations", authRequired, async(req,res)=>{
   try{
     const requested=Number(req.query.limit||config.inboxPageSize);
@@ -300,12 +336,48 @@ router.post("/conversations/:id/deal",authRequired,async(req,res)=>{
   }catch(e){return res.status(e.status||500).json({ok:false,error:e.message});}
 });
 
+router.get("/conversations/:id/lines",authRequired,async(req,res)=>{
+  try{
+    const id=cleanString(decodeURIComponent(req.params.id||""),220); const selected=await inboxDb.collection("conversations").doc(id).get();
+    if(!selected.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
+    const c=selected.data()||{}; const waFrom=String(c.waFrom||""); if(!waFrom)return res.json({ok:true,items:[],readsEstimate:1});
+    const snap=await inboxDb.collection("conversations").where("waFrom","==",waFrom).limit(20).get();
+    const linked=new Set(uniqueStrings(c.duplicateConversationIds||[])); linked.add(id);
+    const items=snap.docs.map(d=>{const x=d.data()||{};return {conversationId:d.id,lineId:x.inboundTo||x.lineId||"",lastMessageAt:iso(x.lastMessageAt||x.updatedAt),linked:linked.has(d.id),current:d.id===id,preferred:String(c.preferredLineId||"")===(x.inboundTo||x.lineId||"")};}).filter(x=>x.lineId);
+    return res.json({ok:true,items,preferredLineId:c.preferredLineId||c.inboundTo||c.lineId||"",readsEstimate:1+snap.size});
+  }catch(e){console.error("conversation lines",e);return res.status(500).json({ok:false,error:e.message});}
+});
+router.post("/conversations/:id/lines/link-all",authRequired,async(req,res)=>{
+  try{
+    const id=cleanString(decodeURIComponent(req.params.id||""),220); const selected=await inboxDb.collection("conversations").doc(id).get();
+    if(!selected.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"}); const c=selected.data()||{}; const waFrom=String(c.waFrom||"");
+    const snap=await inboxDb.collection("conversations").where("waFrom","==",waFrom).limit(20).get(); const ids=snap.docs.map(d=>d.id); const lines=uniqueStrings(snap.docs.map(d=>{const x=d.data()||{};return x.inboundTo||x.lineId||"";}));
+    const batch=inboxDb.batch(); snap.docs.forEach(d=>batch.set(d.ref,{duplicateConversationIds:ids.filter(x=>x!==d.id),linkedLineIds:lines,updatedAt:FieldValue.serverTimestamp()},{merge:true})); await batch.commit();
+    return res.json({ok:true,conversationIds:ids,linkedLineIds:lines,readsEstimate:1+snap.size,writesEstimate:snap.size});
+  }catch(e){console.error("link all lines",e);return res.status(500).json({ok:false,error:e.message});}
+});
+router.post("/conversations/:id/lines/preferred",authRequired,async(req,res)=>{
+  try{
+    const id=cleanString(decodeURIComponent(req.params.id||""),220); const lineId=wa.ensureWhatsappPrefix(cleanString(req.body?.lineId,120));
+    const selected=await inboxDb.collection("conversations").doc(id).get(); if(!selected.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
+    const c=selected.data()||{}; const snap=await inboxDb.collection("conversations").where("waFrom","==",String(c.waFrom||"")).limit(20).get();
+    const valid=snap.docs.some(d=>{const x=d.data()||{};return wa.ensureWhatsappPrefix(x.inboundTo||x.lineId||"")===lineId;}); if(!valid)return res.status(400).json({ok:false,error:"La línea no pertenece a este contacto"});
+    await selected.ref.set({preferredLineId:lineId,updatedAt:FieldValue.serverTimestamp()},{merge:true}); return res.json({ok:true,preferredLineId:lineId,readsEstimate:1+snap.size,writesEstimate:1});
+  }catch(e){console.error("preferred line",e);return res.status(500).json({ok:false,error:e.message});}
+});
+router.get("/conversations/:id/messages/:messageId/media/:index",authRequired,async(req,res)=>{
+  try{
+    const id=cleanString(decodeURIComponent(req.params.id||""),220), messageId=cleanString(decodeURIComponent(req.params.messageId||""),180), index=Math.max(0,Math.min(Number(req.params.index||0)||0,9));
+    const result=await materializeMedia(id,messageId,index); return res.json({ok:true,url:result.url,media:{filename:result.item.filename||"",contentType:result.item.contentType||""},readsEstimate:result.reads,writesEstimate:result.writes});
+  }catch(e){console.error("resolve media",e);return res.status(e.status||500).json({ok:false,error:e.message});}
+});
+
 router.get("/conversations/:id/messages",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);
     if(!id) return res.status(400).json({ok:false,error:"Conversación inválida"});
     const requested=Math.max(20,Math.min(Number(req.query.limit||60),100));
-    const related=uniqueStrings([id, ...(Array.isArray(req.query.relatedIds) ? req.query.relatedIds : String(req.query.relatedIds||"").split(","))]).slice(0,4);
+    const related=uniqueStrings([id, ...(Array.isArray(req.query.relatedIds) ? req.query.relatedIds : String(req.query.relatedIds||"").split(","))]).slice(0,10);
     const all=[]; let reads=0;
     for(const conversationId of related){
       const snap=await inboxDb.collection("conversations").doc(conversationId).collection("messages").orderBy("timestamp","desc").limit(requested).get();
@@ -358,7 +430,7 @@ router.get("/templates",authRequired,async(req,res)=>{
 router.post("/conversations/:id/send",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const text=cleanString(req.body?.text,4000); if(!text) return res.status(400).json({ok:false,error:"Falta el mensaje"});
-    const c=await loadConversationForSend(id); const from=c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
+    const c=await loadConversationForSend(id); const from=c.data.preferredLineId||c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const sent=await wa.sendText({from,to,body:text,req,conversationId:id});
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
     await updateAfterSend(c.ref,text,0,sent.status); return res.json({ok:true,sid:sent.sid,status:sent.status||"queued",readsEstimate:1,writesEstimate:2});
@@ -369,7 +441,7 @@ router.post("/conversations/:id/send-file",authRequired,async(req,res)=>{
   try{
     if(!String(req.headers["content-type"]||"").toLowerCase().includes("multipart/form-data")) return res.status(400).json({ok:false,error:"Content-Type inválido"});
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const parsed=await parseSingleUpload(req); if(!parsed.text&&!parsed.file) return res.status(400).json({ok:false,error:"Falta texto o archivo"});
-    const c=await loadConversationForSend(id); const from=c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
+    const c=await loadConversationForSend(id); const from=c.data.preferredLineId||c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const media=parsed.file ? [await uploadOutbound(parsed.file)] : []; const sent=await wa.sendText({from,to,body:parsed.text,mediaUrls:media.map(x=>x.url),req,conversationId:id});
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text:parsed.text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:media.length,media,deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
     await updateAfterSend(c.ref,parsed.text,media.length,sent.status); return res.json({ok:true,sid:sent.sid,mediaCount:media.length,readsEstimate:1,writesEstimate:2});
@@ -379,7 +451,7 @@ router.post("/conversations/:id/send-file",authRequired,async(req,res)=>{
 router.post("/conversations/:id/send-template",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const contentSid=cleanString(req.body?.contentSid,100); const contentVariables=req.body?.contentVariables&&typeof req.body.contentVariables==="object"?req.body.contentVariables:{}; if(!contentSid)return res.status(400).json({ok:false,error:"Falta contentSid"});
-    const c=await loadConversationForSend(id); const from=c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to)return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
+    const c=await loadConversationForSend(id); const from=c.data.preferredLineId||c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to)return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const sent=await wa.sendTemplate({from,to,contentSid,contentVariables,req,conversationId:id}); const text=`Plantilla enviada (${contentSid})`;
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human-template",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],template:{contentSid,contentVariables},deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
     await updateAfterSend(c.ref,text,0,sent.status); return res.json({ok:true,sid:sent.sid,contentSid,readsEstimate:1,writesEstimate:2});

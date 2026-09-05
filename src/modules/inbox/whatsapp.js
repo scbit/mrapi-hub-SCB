@@ -62,6 +62,12 @@ async function listApprovedTemplates(){
   return (r.data?.contents||[]).map(item=>({sid:item.sid,name:item.friendly_name||item.friendlyName||item.sid,language:item.language||item.locale||"",category:templateCategory(item),whatsappStatus:approvalStatus(item)})).filter(x=>x.whatsappStatus==="approved").sort((a,b)=>a.name.localeCompare(b.name,"es",{sensitivity:"base"}));
 }
 
+async function downloadMedia(url){
+  assertConfigured();
+  const r=await axios.get(String(url||""),{auth:{username:accountSid,password:authToken},responseType:"arraybuffer",timeout:30000,maxContentLength:20*1024*1024});
+  return {buffer:Buffer.from(r.data),contentType:String(r.headers?.["content-type"]||"application/octet-stream"),contentDisposition:String(r.headers?.["content-disposition"]||"")};
+}
+
 function inboundWebhookUrl(req){
   const host=req && typeof req.get==="function" ? String(req.get("host")||"") : "";
   const protocol=req?.protocol || "https";
@@ -76,4 +82,4 @@ function validateInboundWebhook(req){
   const ok=twilio.validateRequest(authToken,signature,url,req.body||{});
   return {ok,url,reason:ok?"":"Firma Twilio inválida"};
 }
-module.exports={client,defaultFrom,ensureWhatsappPrefix,cleanWhatsappNumber,sendText,sendTemplate,listApprovedTemplates,validateInboundWebhook,inboundWebhookUrl};
+module.exports={client,defaultFrom,ensureWhatsappPrefix,cleanWhatsappNumber,sendText,sendTemplate,listApprovedTemplates,downloadMedia,validateInboundWebhook,inboundWebhookUrl};

@@ -1,8 +1,8 @@
-# MR API HUB v1.5.5
+# MR API HUB v1.5.6
 
 **Base:** v1.5.3 Inbox Live.
 
-### Novedades v1.5.5
+### Novedades v1.5.6
 - Audios, PDFs, imágenes y adjuntos visibles/abribles desde la Bandeja.
 - Cache de media entrante en el bucket del tenant al primer acceso.
 - Scroll inteligente: no vuelve abajo si el usuario está leyendo historial.
@@ -10,7 +10,7 @@
 - Administración de múltiples líneas por contacto: descubrir, vincular y elegir línea de respuesta.
 - Mismo código multi-tenant para SCB, Ar-Tec y futuros clientes.
 
-Ver `docs/V1.5.5.md`.
+Ver `docs/V1.5.6.md`.
 
 # MR API HUB v1.5.3 — Multi-tenant + WhatsApp inbound
 
@@ -146,3 +146,42 @@ Cuando una conversación está en `BOT` y están configuradas `DF_PROJECT_ID`, `
 - No recarga las primeras 50 conversaciones en cada ciclo.
 - Al volver a una pestaña oculta hace una sincronización inmediata con pequeño solapamiento para evitar perder eventos.
 - Respeta filtros de owner y permisos del backend.
+
+## v1.5.6 — Desk + Read state + Line catalog
+
+### Desk
+- El botón `Desk` de la navegación abre `MRAPI_DESK_BASE_URL` directamente.
+- La creación de ticket desde el resumen CRM se conserva separada.
+- Si un tenant no tiene Desk configurado, la UI avisa sin romper la Bandeja.
+
+### Leído / No leído manual
+- El chat abierto muestra `Marcar leído` / `Marcar no leído`.
+- `POST /api/inbox/conversations/:id/read`
+- `POST /api/inbox/conversations/:id/unread`
+- El estado se refleja inmediatamente en la lista y KPIs.
+
+### Catálogo global de líneas
+Colección interna: `mrapi_line_catalog`.
+
+- Cada inbound de Twilio registra/actualiza automáticamente la línea receptora.
+- Cada envío registra/actualiza automáticamente la línea usada.
+- `Líneas` en Bandeja muestra el catálogo completo conocido por el tenant.
+- Admin/Backoffice puede agregar una línea manualmente.
+- `Detectar existentes` hace un bootstrap explícito sobre hasta 5.000 conversaciones históricas. Es una operación manual para evitar scans automáticos recurrentes.
+- El catálogo normal se mantiene incrementalmente sin scans.
+
+### Nuevo mensaje
+`+ Nuevo mensaje` permite:
+1. ingresar teléfono del cliente;
+2. elegir una línea activa del tenant;
+3. preparar/abrir la conversación;
+4. enviar texto si existe ventana de WhatsApp o una plantilla aprobada para iniciar fuera de ventana.
+
+Endpoint: `POST /api/inbox/conversations/start`.
+
+### Líneas de un contacto
+El modal `Líneas` ahora combina:
+- líneas históricamente usadas por ese teléfono;
+- líneas globales activas del tenant.
+
+Por lo tanto se puede elegir como `preferredLineId` una línea habilitada aunque ese contacto todavía no haya hablado por ella. `Vincular conversaciones detectadas` sigue agrupando solamente conversaciones históricas reales del mismo teléfono.

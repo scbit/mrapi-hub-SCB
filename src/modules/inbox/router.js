@@ -23,6 +23,18 @@ function deterministicConversationId(from,to){
   const key=`${digits(from)}|${digits(to)}`;
   return `wa_${crypto.createHash("sha256").update(key).digest("hex").slice(0,40)}`;
 }
+const LINE_CATALOG_COLLECTION="mrapi_line_catalog";
+function normalizedLine(v){ return wa.ensureWhatsappPrefix(cleanString(v,120)); }
+function lineDocId(v){ const d=digits(v); return d || crypto.createHash("sha1").update(String(v||"")).digest("hex").slice(0,24); }
+async function touchLine(lineId,{label="",source="observed"}={}){
+  const normalized=normalizedLine(lineId); if(!normalized) return null;
+  const ref=inboxDb.collection(LINE_CATALOG_COLLECTION).doc(lineDocId(normalized));
+  const patch={lineId:normalized,phone:wa.cleanWhatsappNumber(normalized),active:true,source:cleanString(source,80)||"observed",lastSeenAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()};
+  if(label) patch.label=cleanString(label,120);
+  await ref.set(patch,{merge:true});
+  return {ref,lineId:normalized};
+}
+function lineItem(doc){ const d=doc.data()||{}; return {id:doc.id,lineId:normalizedLine(d.lineId||d.phone),phone:wa.cleanWhatsappNumber(d.lineId||d.phone),label:cleanString(d.label,120),active:d.active!==false,source:d.source||"",lastSeenAt:iso(d.lastSeenAt||d.updatedAt),createdAt:iso(d.createdAt)}; }
 function twilioMedia(body){
   const count=Math.max(0,Math.min(Number(body?.NumMedia||0)||0,10));
   const items=[];
@@ -336,15 +348,69 @@ router.post("/conversations/:id/deal",authRequired,async(req,res)=>{
   }catch(e){return res.status(e.status||500).json({ok:false,error:e.message});}
 });
 
+router.get("/lines/catalog",authRequired,async(req,res)=>{
+  try{
+    const snap=await inboxDb.collection(LINE_CATALOG_COLLECTION).orderBy("phone","asc").limit(500).get();
+    const items=snap.docs.map(lineItem).filter(x=>x.lineId);
+    const def=normalizedLine(wa.defaultFrom);
+    if(def && !items.some(x=>x.lineId===def)) items.unshift({id:"default",lineId:def,phone:wa.cleanWhatsappNumber(def),label:"Línea predeterminada",active:true,source:"TWILIO_WHATSAPP_FROM",lastSeenAt:null,createdAt:null});
+    return res.json({ok:true,items,readsEstimate:snap.size,canManage:isAdminLike(req.authUser)});
+  }catch(e){console.error("line catalog",e);return res.status(500).json({ok:false,error:e.message});}
+});
+router.post("/lines/catalog",authRequired,async(req,res)=>{
+  try{
+    if(!isAdminLike(req.authUser)) return res.status(403).json({ok:false,error:"Solo Admin/Backoffice puede agregar líneas"});
+    const lineId=normalizedLine(req.body?.lineId||req.body?.phone); if(!lineId||digits(lineId).length<8)return res.status(400).json({ok:false,error:"Número de línea inválido"});
+    const label=cleanString(req.body?.label,120); const touched=await touchLine(lineId,{label,source:"manual"});
+    return res.json({ok:true,item:{id:touched.ref.id,lineId,phone:wa.cleanWhatsappNumber(lineId),label,active:true,source:"manual"},readsEstimate:0,writesEstimate:1});
+  }catch(e){console.error("add line",e);return res.status(500).json({ok:false,error:e.message});}
+});
+router.post("/lines/bootstrap",authRequired,async(req,res)=>{
+  try{
+    if(!isAdminLike(req.authUser)) return res.status(403).json({ok:false,error:"Solo Admin/Backoffice puede detectar líneas históricas"});
+    const max=Math.max(100,Math.min(Number(req.body?.limit||3000),5000));
+    const snap=await inboxDb.collection("conversations").select("inboundTo","lineId","preferredLineId","linkedLineIds").limit(max).get();
+    const lines=new Set();
+    for(const d of snap.docs){const x=d.data()||{};[x.inboundTo,x.lineId,x.preferredLineId,...(Array.isArray(x.linkedLineIds)?x.linkedLineIds:[])].forEach(v=>{const n=normalizedLine(v);if(n)lines.add(n)});}
+    const def=normalizedLine(wa.defaultFrom); if(def) lines.add(def);
+    const arr=[...lines]; let writes=0;
+    for(let i=0;i<arr.length;i+=400){const batch=inboxDb.batch();for(const lineId of arr.slice(i,i+400)){const ref=inboxDb.collection(LINE_CATALOG_COLLECTION).doc(lineDocId(lineId));batch.set(ref,{lineId,phone:wa.cleanWhatsappNumber(lineId),active:true,source:"historical-bootstrap",lastSeenAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()},{merge:true});writes++;}await batch.commit();}
+    return res.json({ok:true,detected:arr.length,scanned:snap.size,truncated:snap.size===max,readsEstimate:snap.size,writesEstimate:writes});
+  }catch(e){console.error("bootstrap lines",e);return res.status(500).json({ok:false,error:e.message});}
+});
+router.post("/conversations/start",authRequired,async(req,res)=>{
+  try{
+    const to=normalizedLine(req.body?.phone); const lineId=normalizedLine(req.body?.lineId||wa.defaultFrom);
+    if(!to||digits(to).length<8)return res.status(400).json({ok:false,error:"Teléfono del cliente inválido"});
+    if(!lineId)return res.status(400).json({ok:false,error:"Elegí una línea de salida"});
+    let valid=lineId===normalizedLine(wa.defaultFrom), reads=0;
+    if(!valid){const ls=await inboxDb.collection(LINE_CATALOG_COLLECTION).doc(lineDocId(lineId)).get();reads=1;valid=ls.exists&&(ls.data()||{}).active!==false;}
+    if(!valid)return res.status(400).json({ok:false,error:"La línea elegida no está habilitada en el catálogo"});
+    const id=deterministicConversationId(to,lineId); const ref=inboxDb.collection("conversations").doc(id); const snap=await ref.get(); reads++;
+    const now=FieldValue.serverTimestamp();
+    const name=cleanString(req.body?.name,180);
+    if(!snap.exists){await ref.set({waFrom:to,inboundTo:lineId,lineId,preferredLineId:lineId,contactName:name||wa.cleanWhatsappNumber(to),profileName:name||"",mode:"HUMAN",stage:"nuevo",ownerEmail:String(req.authUser?.email||"").toLowerCase(),isAssigned:Boolean(req.authUser?.email),isLinked:false,hasUnread:false,unreadCount:0,sourceChannel:"whatsapp",createdAt:now,updatedAt:now,lastMessageAt:null,lastMessagePreview:""},{merge:true});}
+    else await ref.set({preferredLineId:lineId,updatedAt:now},{merge:true});
+    await touchLine(lineId,{source:"outbound-start"});
+    const fresh=await ref.get(); reads++;
+    return res.json({ok:true,item:summary(fresh),existing:snap.exists,readsEstimate:reads+1,writesEstimate:snap.exists?2:2});
+  }catch(e){console.error("start conversation",e);return res.status(500).json({ok:false,error:e.message});}
+});
+
 router.get("/conversations/:id/lines",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const selected=await inboxDb.collection("conversations").doc(id).get();
     if(!selected.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
     const c=selected.data()||{}; const waFrom=String(c.waFrom||""); if(!waFrom)return res.json({ok:true,items:[],readsEstimate:1});
-    const snap=await inboxDb.collection("conversations").where("waFrom","==",waFrom).limit(20).get();
+    const [snap,catalog]=await Promise.all([inboxDb.collection("conversations").where("waFrom","==",waFrom).limit(50).get(),inboxDb.collection(LINE_CATALOG_COLLECTION).orderBy("phone","asc").limit(500).get()]);
     const linked=new Set(uniqueStrings(c.duplicateConversationIds||[])); linked.add(id);
-    const items=snap.docs.map(d=>{const x=d.data()||{};return {conversationId:d.id,lineId:x.inboundTo||x.lineId||"",lastMessageAt:iso(x.lastMessageAt||x.updatedAt),linked:linked.has(d.id),current:d.id===id,preferred:String(c.preferredLineId||"")===(x.inboundTo||x.lineId||"")};}).filter(x=>x.lineId);
-    return res.json({ok:true,items,preferredLineId:c.preferredLineId||c.inboundTo||c.lineId||"",readsEstimate:1+snap.size});
+    const byLine=new Map();
+    for(const d of snap.docs){const x=d.data()||{};const lineId=normalizedLine(x.inboundTo||x.lineId||"");if(!lineId)continue;byLine.set(lineId,{conversationId:d.id,lineId,lastMessageAt:iso(x.lastMessageAt||x.updatedAt),linked:linked.has(d.id),current:d.id===id,available:true,historical:true,label:""});}
+    for(const d of catalog.docs){const li=lineItem(d);if(!li.lineId||!li.active)continue;const prev=byLine.get(li.lineId)||{};byLine.set(li.lineId,{conversationId:prev.conversationId||"",lineId:li.lineId,lastMessageAt:prev.lastMessageAt||li.lastSeenAt,linked:Boolean(prev.linked),current:Boolean(prev.current),available:true,historical:Boolean(prev.historical),label:li.label||prev.label||""});}
+    const def=normalizedLine(wa.defaultFrom); if(def&&!byLine.has(def))byLine.set(def,{conversationId:"",lineId:def,lastMessageAt:null,linked:false,current:false,available:true,historical:false,label:"Línea predeterminada"});
+    const preferred=normalizedLine(c.preferredLineId||c.inboundTo||c.lineId||"");
+    const items=[...byLine.values()].map(x=>({...x,preferred:x.lineId===preferred}));
+    return res.json({ok:true,items,preferredLineId:preferred,readsEstimate:1+snap.size+catalog.size});
   }catch(e){console.error("conversation lines",e);return res.status(500).json({ok:false,error:e.message});}
 });
 router.post("/conversations/:id/lines/link-all",authRequired,async(req,res)=>{
@@ -360,9 +426,11 @@ router.post("/conversations/:id/lines/preferred",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const lineId=wa.ensureWhatsappPrefix(cleanString(req.body?.lineId,120));
     const selected=await inboxDb.collection("conversations").doc(id).get(); if(!selected.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
-    const c=selected.data()||{}; const snap=await inboxDb.collection("conversations").where("waFrom","==",String(c.waFrom||"")).limit(20).get();
-    const valid=snap.docs.some(d=>{const x=d.data()||{};return wa.ensureWhatsappPrefix(x.inboundTo||x.lineId||"")===lineId;}); if(!valid)return res.status(400).json({ok:false,error:"La línea no pertenece a este contacto"});
-    await selected.ref.set({preferredLineId:lineId,updatedAt:FieldValue.serverTimestamp()},{merge:true}); return res.json({ok:true,preferredLineId:lineId,readsEstimate:1+snap.size,writesEstimate:1});
+    const c=selected.data()||{}; let valid=lineId===normalizedLine(wa.defaultFrom), reads=1;
+    if(!valid){const ls=await inboxDb.collection(LINE_CATALOG_COLLECTION).doc(lineDocId(lineId)).get();reads++;valid=ls.exists&&(ls.data()||{}).active!==false;}
+    if(!valid){const snap=await inboxDb.collection("conversations").where("waFrom","==",String(c.waFrom||"")).limit(50).get();reads+=snap.size;valid=snap.docs.some(d=>{const x=d.data()||{};return normalizedLine(x.inboundTo||x.lineId||"")===lineId;});}
+    if(!valid)return res.status(400).json({ok:false,error:"La línea no está habilitada"});
+    await selected.ref.set({preferredLineId:lineId,updatedAt:FieldValue.serverTimestamp()},{merge:true}); await touchLine(lineId,{source:"preferred"}); return res.json({ok:true,preferredLineId:lineId,readsEstimate:reads+1,writesEstimate:2});
   }catch(e){console.error("preferred line",e);return res.status(500).json({ok:false,error:e.message});}
 });
 router.get("/conversations/:id/messages/:messageId/media/:index",authRequired,async(req,res)=>{
@@ -434,6 +502,13 @@ router.post("/conversations/:id/read",authRequired,async(req,res)=>{
     return res.json({ok:true,writesEstimate:1});
   }catch(e){ console.error("inbox read",e); return res.status(500).json({ok:false,error:e.message}); }
 });
+router.post("/conversations/:id/unread",authRequired,async(req,res)=>{
+  try{
+    const id=cleanString(decodeURIComponent(req.params.id||""),220);
+    await inboxDb.collection("conversations").doc(id).set({hasUnread:true,unreadCount:1,manualUnread:true,manualUnreadAt:FieldValue.serverTimestamp(),manualUnreadBy:req.authUser.email||req.authUser.id},{merge:true});
+    return res.json({ok:true,writesEstimate:1});
+  }catch(e){ console.error("inbox unread",e); return res.status(500).json({ok:false,error:e.message}); }
+});
 
 
 router.get("/templates",authRequired,async(req,res)=>{
@@ -447,7 +522,7 @@ router.post("/conversations/:id/send",authRequired,async(req,res)=>{
     const c=await loadConversationForSend(id); const from=c.data.preferredLineId||c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const sent=await wa.sendText({from,to,body:text,req,conversationId:id});
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
-    await updateAfterSend(c.ref,text,0,sent.status); return res.json({ok:true,sid:sent.sid,status:sent.status||"queued",readsEstimate:1,writesEstimate:2});
+    await updateAfterSend(c.ref,text,0,sent.status); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,status:sent.status||"queued",readsEstimate:1,writesEstimate:3});
   }catch(e){console.error("send",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });
 
@@ -458,7 +533,7 @@ router.post("/conversations/:id/send-file",authRequired,async(req,res)=>{
     const c=await loadConversationForSend(id); const from=c.data.preferredLineId||c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const media=parsed.file ? [await uploadOutbound(parsed.file)] : []; const sent=await wa.sendText({from,to,body:parsed.text,mediaUrls:media.map(x=>x.url),req,conversationId:id});
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text:parsed.text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:media.length,media,deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
-    await updateAfterSend(c.ref,parsed.text,media.length,sent.status); return res.json({ok:true,sid:sent.sid,mediaCount:media.length,readsEstimate:1,writesEstimate:2});
+    await updateAfterSend(c.ref,parsed.text,media.length,sent.status); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,mediaCount:media.length,readsEstimate:1,writesEstimate:3});
   }catch(e){console.error("send-file",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });
 
@@ -468,7 +543,7 @@ router.post("/conversations/:id/send-template",authRequired,async(req,res)=>{
     const c=await loadConversationForSend(id); const from=c.data.preferredLineId||c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to)return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const sent=await wa.sendTemplate({from,to,contentSid,contentVariables,req,conversationId:id}); const text=`Plantilla enviada (${contentSid})`;
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human-template",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],template:{contentSid,contentVariables},deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
-    await updateAfterSend(c.ref,text,0,sent.status); return res.json({ok:true,sid:sent.sid,contentSid,readsEstimate:1,writesEstimate:2});
+    await updateAfterSend(c.ref,text,0,sent.status); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,contentSid,readsEstimate:1,writesEstimate:3});
   }catch(e){console.error("send-template",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });
 
@@ -525,6 +600,7 @@ router.post("/twilio/inbound",async(req,res)=>{
       }
       tx.set(convoRef,patch,{merge:true});
     });
+    if(!duplicate){try{await touchLine(to,{source:"twilio-inbound"});}catch(lineErr){console.warn("line catalog inbound",lineErr.message)}}
     let botResult={skipped:true};
     if(!duplicate && shouldBot){
       botResult=await processBotInbound({conversationId,convoRef,from,to,body,inboundSid:sid});

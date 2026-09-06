@@ -20,22 +20,29 @@ function digits(v){ return String(v || "").replace(/\D/g, ""); }
 function cleanString(v, max=500){ return String(v || "").trim().slice(0,max); }
 function uniqueStrings(values){ return [...new Set((values || []).map(v=>cleanString(v,220)).filter(Boolean))]; }
 function base64UrlEncode(value){ return Buffer.from(String(value),"utf8").toString("base64url"); }
+function normalizeDeskRole(role){
+  const value=String(role||"").trim().toLowerCase();
+  if(value==="admin") return "admin";
+  if(value==="backoffice") return "backoffice";
+  if(value==="team_leader") return "team_leader";
+  return "field_sales";
+}
 function createDeskSsoToken(user){
-  if(!config.deskSsoSecret) throw new Error("DESK_SSO_SECRET no está configurado en HUB");
+  // Contract copied from the legacy CRM so SCB Desk validates the token unchanged.
+  if(!config.deskSsoSecret) throw new Error("Falta configurar DESK_SSO_SECRET");
   const now=Math.floor(Date.now()/1000);
   const payload={
     sub:String(user?.id||""),
     email:String(user?.email||"").trim().toLowerCase(),
     name:String(user?.name||""),
-    role:String(user?.role||""),
-    tenantId:String(config.tenantId||""),
+    role:normalizeDeskRole(user?.role),
     iat:now,
     exp:now+Number(config.deskSsoTtlSeconds||60),
     nonce:crypto.randomBytes(12).toString("hex")
   };
-  const encoded=base64UrlEncode(JSON.stringify(payload));
-  const sig=crypto.createHmac("sha256",config.deskSsoSecret).update(encoded).digest("base64url");
-  return `${encoded}.${sig}`;
+  const encodedPayload=base64UrlEncode(JSON.stringify(payload));
+  const signature=crypto.createHmac("sha256",config.deskSsoSecret).update(encodedPayload).digest("base64url");
+  return `${encodedPayload}.${signature}`;
 }
 function deterministicConversationId(from,to){
   const key=`${digits(from)}|${digits(to)}`;
@@ -43,6 +50,16 @@ function deterministicConversationId(from,to){
 }
 const LINE_CATALOG_COLLECTION="mrapi_line_catalog";
 function normalizedLine(v){ return wa.ensureWhatsappPrefix(cleanString(v,120)); }
+function canonicalLines(values){
+  const out=[]; const seen=new Set();
+  for(const value of (values||[])){
+    const normalized=normalizedLine(value);
+    const key=digits(normalized);
+    if(!key || seen.has(key)) continue;
+    seen.add(key); out.push(`whatsapp:+${key}`);
+  }
+  return out;
+}
 function lineDocId(v){ const d=digits(v); return d || crypto.createHash("sha1").update(String(v||"")).digest("hex").slice(0,24); }
 async function touchLine(lineId,{label="",source="observed"}={}){
   const normalized=normalizedLine(lineId); if(!normalized) return null;
@@ -110,8 +127,8 @@ function summary(doc){
     inboundTo: d.inboundTo || "",
     lineId: d.lineId || d.inboundTo || "",
     preferredLineId: d.preferredLineId || "",
-    linkedLineIds: uniqueStrings(d.linkedLineIds || []),
-    lineCount: Math.max(1, uniqueStrings([d.lineId||d.inboundTo||"", ...(d.linkedLineIds || [])]).length),
+    linkedLineIds: canonicalLines(d.linkedLineIds || []),
+    lineCount: Math.max(1, canonicalLines([d.lineId||d.inboundTo||"", ...(d.linkedLineIds || [])]).length),
     ownerEmail: String(d.ownerEmail || "").toLowerCase(),
     isAssigned: Boolean(String(d.ownerEmail || "").trim()),
     isLinked: Boolean(String(d.dealId || "").trim() || String(d.contactId || "").trim()),
@@ -436,7 +453,7 @@ router.post("/conversations/:id/lines/link-all",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const selected=await inboxDb.collection("conversations").doc(id).get();
     if(!selected.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"}); const c=selected.data()||{}; const waFrom=String(c.waFrom||"");
-    const snap=await inboxDb.collection("conversations").where("waFrom","==",waFrom).limit(20).get(); const ids=snap.docs.map(d=>d.id); const lines=uniqueStrings(snap.docs.map(d=>{const x=d.data()||{};return x.inboundTo||x.lineId||"";}));
+    const snap=await inboxDb.collection("conversations").where("waFrom","==",waFrom).limit(20).get(); const ids=snap.docs.map(d=>d.id); const lines=canonicalLines(snap.docs.map(d=>{const x=d.data()||{};return x.inboundTo||x.lineId||"";}));
     const batch=inboxDb.batch(); snap.docs.forEach(d=>batch.set(d.ref,{duplicateConversationIds:ids.filter(x=>x!==d.id),linkedLineIds:lines,updatedAt:FieldValue.serverTimestamp()},{merge:true})); await batch.commit();
     return res.json({ok:true,conversationIds:ids,linkedLineIds:lines,readsEstimate:1+snap.size,writesEstimate:snap.size});
   }catch(e){console.error("link all lines",e);return res.status(500).json({ok:false,error:e.message});}
@@ -459,7 +476,7 @@ router.get("/conversations/:id/line-alert",authRequired,async(req,res)=>{
     const selected=await ref.get();
     if(!selected.exists) return res.status(404).json({ok:false,error:"Conversación no encontrada"});
     const c=selected.data()||{};
-    const existingLines=uniqueStrings([c.lineId||c.inboundTo||"", ...(c.linkedLineIds||[])]).map(normalizedLine).filter(Boolean);
+    const existingLines=canonicalLines([c.lineId||c.inboundTo||"", ...(c.linkedLineIds||[])]);
     if(existingLines.length>1){
       return res.json({ok:true,multiple:true,count:existingLines.length,linkedLineIds:existingLines,conversationIds:uniqueStrings([id,...(c.duplicateConversationIds||[])]),readsEstimate:1,writesEstimate:0,cached:true});
     }
@@ -467,14 +484,24 @@ router.get("/conversations/:id/line-alert",authRequired,async(req,res)=>{
     if(!waFrom) return res.json({ok:true,multiple:false,count:existingLines.length||1,linkedLineIds:existingLines,conversationIds:[id],readsEstimate:1,writesEstimate:0});
     const snap=await inboxDb.collection("conversations").where("waFrom","==",waFrom).limit(20).get();
     const ids=snap.docs.map(d=>d.id);
-    const lines=uniqueStrings(snap.docs.map(d=>{const x=d.data()||{};return normalizedLine(x.inboundTo||x.lineId||"");})).filter(Boolean);
+    const lines=canonicalLines(snap.docs.map(d=>{const x=d.data()||{};return x.inboundTo||x.lineId||"";}));
     let writes=0;
-    if(lines.length>1 && snap.size>1){
+    if(snap.size){
+      const isMulti=lines.length>1 && snap.size>1;
       const batch=inboxDb.batch();
-      snap.docs.forEach(d=>{batch.set(d.ref,{duplicateConversationIds:ids.filter(x=>x!==d.id),linkedLineIds:lines,multiLineDetected:true,multiLineCount:lines.length,multiLineUpdatedAt:FieldValue.serverTimestamp()},{merge:true});writes++;});
+      snap.docs.forEach(d=>{
+        batch.set(d.ref,{
+          duplicateConversationIds:isMulti?ids.filter(x=>x!==d.id):[],
+          linkedLineIds:lines,
+          multiLineDetected:isMulti,
+          multiLineCount:Math.max(1,lines.length),
+          multiLineUpdatedAt:FieldValue.serverTimestamp()
+        },{merge:true});
+        writes++;
+      });
       await batch.commit();
     }
-    return res.json({ok:true,multiple:lines.length>1,count:Math.max(1,lines.length),linkedLineIds:lines,conversationIds:ids,readsEstimate:1+snap.size,writesEstimate:writes,cached:false});
+    return res.json({ok:true,multiple:lines.length>1,count:Math.max(1,lines.length),linkedLineIds:lines,conversationIds:lines.length>1?ids:[id],readsEstimate:1+snap.size,writesEstimate:writes,cached:false});
   }catch(e){console.error("line alert",e);return res.status(500).json({ok:false,error:e.message});}
 });
 
@@ -661,7 +688,7 @@ router.post("/twilio/inbound",async(req,res)=>{
       try{
         const siblings=await inboxDb.collection("conversations").where("waFrom","==",from).limit(20).get();
         const ids=siblings.docs.map(d=>d.id);
-        const lines=uniqueStrings(siblings.docs.map(d=>{const x=d.data()||{};return normalizedLine(x.inboundTo||x.lineId||"");})).filter(Boolean);
+        const lines=canonicalLines(siblings.docs.map(d=>{const x=d.data()||{};return x.inboundTo||x.lineId||"";}));
         if(lines.length>1 && siblings.size>1){
           const batch=inboxDb.batch();
           siblings.docs.forEach(d=>batch.set(d.ref,{duplicateConversationIds:ids.filter(x=>x!==d.id),linkedLineIds:lines,multiLineDetected:true,multiLineCount:lines.length,multiLineUpdatedAt:FieldValue.serverTimestamp()},{merge:true}));

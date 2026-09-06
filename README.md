@@ -221,3 +221,10 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Stores the first ad-associated inbound message as `leadOriginMessage`.
 - Keeps the advertising card fixed above the scrollable conversation.
 - Existing legacy referral fields remain supported as fallback.
+
+## v1.5.11 — Chat layout restore
+- Advertising origin stays fixed but compact.
+- Message history gets the remaining vertical space again.
+- Composer stays visible at normal height.
+- Prevents the ad card from shrinking the chat.
+- Mobile layout adjusted separately.

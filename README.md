@@ -1,4 +1,4 @@
-# MR API HUB v1.5.9
+# MR API HUB v1.5.10
 
 **Base:** v1.5.3 Inbox Live.
 
@@ -214,3 +214,10 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Applies owner visibility rules.
 - Does not scan the full conversations collection.
 - Materializes the resulting linked lines only on the opened conversation.
+
+## v1.5.10 — Fixed advertising origin
+- Advertising acquisition source is now immutable once detected.
+- Later normal WhatsApp messages no longer overwrite a Meta Ads origin.
+- Stores the first ad-associated inbound message as `leadOriginMessage`.
+- Keeps the advertising card fixed above the scrollable conversation.
+- Existing legacy referral fields remain supported as fallback.

@@ -214,16 +214,26 @@ function summary(doc){
     lastMessageAt: iso(d.lastMessageAt || d.updatedAt),
     unreadCount: Number(d.unreadCount || 0),
     lastDeliveryStatus: d.lastDeliveryStatus || "",
-    sourceChannel: d.sourceChannel || "",
-    leadPlatform: d.leadPlatform || d.leadAd?.platform || "",
-    referralCtwaClid: d.referralCtwaClid || "",
-    referralAdId: d.referralAdId || d.leadAd?.adId || "",
-    referralSourceType: d.referralSourceType || "",
-    referralHeadline: d.referralHeadline || d.leadAd?.headline || d.leadAd?.title || d.leadAd?.adName || "",
-    referralBody: d.referralBody || d.leadAd?.body || d.leadAd?.text || d.leadAd?.description || "",
-    referralImageUrl: d.referralImageUrl || d.leadAd?.imageUrl || "",
-    campaignName: d.campaignName || d.leadAd?.campaignName || "",
-    adsetName: d.adsetName || d.leadAd?.adsetName || "",
+    sourceChannel: d.leadOriginType || d.sourceChannel || "",
+    leadPlatform: d.leadOriginPlatform || d.leadPlatform || d.leadAd?.platform || "",
+    leadOriginType: d.leadOriginType || "",
+    leadOriginMessage: d.leadOriginMessage || "",
+    leadOriginAt: iso(d.leadOriginAt),
+    leadOriginCtwaClid: d.leadOriginCtwaClid || "",
+    leadOriginAdId: d.leadOriginAdId || "",
+    leadOriginSourceType: d.leadOriginSourceType || "",
+    leadOriginHeadline: d.leadOriginHeadline || "",
+    leadOriginBody: d.leadOriginBody || "",
+    leadOriginImageUrl: d.leadOriginImageUrl || "",
+    leadOriginSourceUrl: d.leadOriginSourceUrl || "",
+    referralCtwaClid: d.leadOriginCtwaClid || d.referralCtwaClid || "",
+    referralAdId: d.leadOriginAdId || d.referralAdId || d.leadAd?.adId || "",
+    referralSourceType: d.leadOriginSourceType || d.referralSourceType || "",
+    referralHeadline: d.leadOriginHeadline || d.referralHeadline || d.leadAd?.headline || d.leadAd?.title || d.leadAd?.adName || "",
+    referralBody: d.leadOriginBody || d.referralBody || d.leadAd?.body || d.leadAd?.text || d.leadAd?.description || "",
+    referralImageUrl: d.leadOriginImageUrl || d.referralImageUrl || d.leadAd?.imageUrl || "",
+    campaignName: d.leadOriginCampaignName || d.campaignName || d.leadAd?.campaignName || "",
+    adsetName: d.leadOriginAdsetName || d.adsetName || d.leadAd?.adsetName || "",
     leadAd: d.leadAd && typeof d.leadAd === "object" ? d.leadAd : null,
     duplicateConversationIds: uniqueStrings(d.duplicateConversationIds || [])
   };
@@ -749,21 +759,40 @@ router.post("/twilio/inbound",async(req,res)=>{
         referralHeadline:referral.headline,referralBody:referral.body,referralImageUrl:referral.image,referralSourceUrl:referral.sourceUrl
       };
       tx.set(msgRef,msgData,{merge:false});
+      const existingConvo=convoSnap.exists?(convoSnap.data()||{}):{};
+      const priorSource=String(existingConvo.leadOriginType||existingConvo.sourceChannel||"").toLowerCase();
       const patch={
         waFrom:from,inboundTo:to,lineId:to,profileName,contactName:convoSnap.exists?undefined:(profileName||wa.cleanWhatsappNumber(from)),
         lastMessageAt:now,lastInboundMessageAt:now,updatedAt:now,lastMessagePreview:preview(body,media.length),lastMessageDirection:"IN",
-        hasUnread:true,unreadCount:FieldValue.increment(1),lastDeliveryStatus:"received",sourceChannel:referral.has?"meta_ad":"whatsapp"
+        hasUnread:true,unreadCount:FieldValue.increment(1),lastDeliveryStatus:"received",
+        // Once a lead entered through advertising, preserve that acquisition source.
+        sourceChannel:referral.has?"meta_ad":(priorSource==="meta_ad"?"meta_ad":(existingConvo.sourceChannel||"whatsapp"))
       };
       Object.keys(patch).forEach(k=>patch[k]===undefined&&delete patch[k]);
-      const currentMode=convoSnap.exists ? normalizeMode((convoSnap.data()||{}).mode) : (dialogflow.configured()?"BOT":"HUMAN");
+      const currentMode=convoSnap.exists ? normalizeMode(existingConvo.mode) : (dialogflow.configured()?"BOT":"HUMAN");
       shouldBot=currentMode==="BOT";
       isNewConversation=!convoSnap.exists;
       if(!convoSnap.exists){
         patch.createdAt=now;patch.mode=currentMode;patch.stage="nuevo";patch.ownerEmail="";patch.isAssigned=false;patch.isLinked=false;
       }
       if(referral.has){
-        patch.leadPlatform="meta";patch.referralCtwaClid=referral.ctwa;patch.referralAdId=referral.sourceId;patch.referralSourceType=referral.sourceType;
+        patch.leadPlatform="meta";
+        patch.referralCtwaClid=referral.ctwa;patch.referralAdId=referral.sourceId;patch.referralSourceType=referral.sourceType;
         patch.referralHeadline=referral.headline;patch.referralBody=referral.body;patch.referralImageUrl=referral.image;patch.referralSourceUrl=referral.sourceUrl;
+        // Immutable acquisition snapshot: first ad/referral wins forever.
+        if(!existingConvo.leadOriginType){
+          patch.leadOriginType="meta_ad";
+          patch.leadOriginPlatform="meta";
+          patch.leadOriginMessage=cleanString(body,2000);
+          patch.leadOriginAt=now;
+          patch.leadOriginCtwaClid=referral.ctwa;
+          patch.leadOriginAdId=referral.sourceId;
+          patch.leadOriginSourceType=referral.sourceType;
+          patch.leadOriginHeadline=referral.headline;
+          patch.leadOriginBody=referral.body;
+          patch.leadOriginImageUrl=referral.image;
+          patch.leadOriginSourceUrl=referral.sourceUrl;
+        }
       }
       tx.set(convoRef,patch,{merge:true});
     });

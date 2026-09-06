@@ -19,6 +19,24 @@ function iso(v) {
 function digits(v){ return String(v || "").replace(/\D/g, ""); }
 function cleanString(v, max=500){ return String(v || "").trim().slice(0,max); }
 function uniqueStrings(values){ return [...new Set((values || []).map(v=>cleanString(v,220)).filter(Boolean))]; }
+function base64UrlEncode(value){ return Buffer.from(String(value),"utf8").toString("base64url"); }
+function createDeskSsoToken(user){
+  if(!config.deskSsoSecret) throw new Error("DESK_SSO_SECRET no está configurado en HUB");
+  const now=Math.floor(Date.now()/1000);
+  const payload={
+    sub:String(user?.id||""),
+    email:String(user?.email||"").trim().toLowerCase(),
+    name:String(user?.name||""),
+    role:String(user?.role||""),
+    tenantId:String(config.tenantId||""),
+    iat:now,
+    exp:now+Number(config.deskSsoTtlSeconds||60),
+    nonce:crypto.randomBytes(12).toString("hex")
+  };
+  const encoded=base64UrlEncode(JSON.stringify(payload));
+  const sig=crypto.createHmac("sha256",config.deskSsoSecret).update(encoded).digest("base64url");
+  return `${encoded}.${sig}`;
+}
 function deterministicConversationId(from,to){
   const key=`${digits(from)}|${digits(to)}`;
   return `wa_${crypto.createHash("sha256").update(key).digest("hex").slice(0,40)}`;
@@ -93,6 +111,7 @@ function summary(doc){
     lineId: d.lineId || d.inboundTo || "",
     preferredLineId: d.preferredLineId || "",
     linkedLineIds: uniqueStrings(d.linkedLineIds || []),
+    lineCount: Math.max(1, uniqueStrings([d.lineId||d.inboundTo||"", ...(d.linkedLineIds || [])]).length),
     ownerEmail: String(d.ownerEmail || "").toLowerCase(),
     isAssigned: Boolean(String(d.ownerEmail || "").trim()),
     isLinked: Boolean(String(d.dealId || "").trim() || String(d.contactId || "").trim()),
@@ -433,6 +452,32 @@ router.post("/conversations/:id/lines/preferred",authRequired,async(req,res)=>{
     await selected.ref.set({preferredLineId:lineId,updatedAt:FieldValue.serverTimestamp()},{merge:true}); await touchLine(lineId,{source:"preferred"}); return res.json({ok:true,preferredLineId:lineId,readsEstimate:reads+1,writesEstimate:2});
   }catch(e){console.error("preferred line",e);return res.status(500).json({ok:false,error:e.message});}
 });
+router.get("/conversations/:id/line-alert",authRequired,async(req,res)=>{
+  try{
+    const id=cleanString(decodeURIComponent(req.params.id||""),220);
+    const ref=inboxDb.collection("conversations").doc(id);
+    const selected=await ref.get();
+    if(!selected.exists) return res.status(404).json({ok:false,error:"Conversación no encontrada"});
+    const c=selected.data()||{};
+    const existingLines=uniqueStrings([c.lineId||c.inboundTo||"", ...(c.linkedLineIds||[])]).map(normalizedLine).filter(Boolean);
+    if(existingLines.length>1){
+      return res.json({ok:true,multiple:true,count:existingLines.length,linkedLineIds:existingLines,conversationIds:uniqueStrings([id,...(c.duplicateConversationIds||[])]),readsEstimate:1,writesEstimate:0,cached:true});
+    }
+    const waFrom=String(c.waFrom||"");
+    if(!waFrom) return res.json({ok:true,multiple:false,count:existingLines.length||1,linkedLineIds:existingLines,conversationIds:[id],readsEstimate:1,writesEstimate:0});
+    const snap=await inboxDb.collection("conversations").where("waFrom","==",waFrom).limit(20).get();
+    const ids=snap.docs.map(d=>d.id);
+    const lines=uniqueStrings(snap.docs.map(d=>{const x=d.data()||{};return normalizedLine(x.inboundTo||x.lineId||"");})).filter(Boolean);
+    let writes=0;
+    if(lines.length>1 && snap.size>1){
+      const batch=inboxDb.batch();
+      snap.docs.forEach(d=>{batch.set(d.ref,{duplicateConversationIds:ids.filter(x=>x!==d.id),linkedLineIds:lines,multiLineDetected:true,multiLineCount:lines.length,multiLineUpdatedAt:FieldValue.serverTimestamp()},{merge:true});writes++;});
+      await batch.commit();
+    }
+    return res.json({ok:true,multiple:lines.length>1,count:Math.max(1,lines.length),linkedLineIds:lines,conversationIds:ids,readsEstimate:1+snap.size,writesEstimate:writes,cached:false});
+  }catch(e){console.error("line alert",e);return res.status(500).json({ok:false,error:e.message});}
+});
+
 router.get("/conversations/:id/messages/:messageId/media/:index",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220), messageId=cleanString(decodeURIComponent(req.params.messageId||""),180), index=Math.max(0,Math.min(Number(req.params.index||0)||0,9));
@@ -511,6 +556,15 @@ router.post("/conversations/:id/unread",authRequired,async(req,res)=>{
 });
 
 
+router.post("/desk/sso",authRequired,async(req,res)=>{
+  try{
+    if(!config.deskBaseUrl) return res.status(503).json({ok:false,error:"Desk no configurado para este tenant"});
+    if(!config.deskSsoSecret) return res.status(503).json({ok:false,error:"Falta DESK_SSO_SECRET en MR API HUB"});
+    const token=createDeskSsoToken(req.authUser);
+    return res.json({ok:true,url:`${config.deskBaseUrl}/auth/crm?token=${encodeURIComponent(token)}`,expiresIn:Number(config.deskSsoTtlSeconds||60),readsEstimate:0});
+  }catch(e){ console.error("desk sso",e); return res.status(500).json({ok:false,error:e.message||"No se pudo iniciar Desk"}); }
+});
+
 router.get("/templates",authRequired,async(req,res)=>{
   try{ const templates=await wa.listApprovedTemplates(); return res.json({ok:true,templates,readsEstimate:0}); }
   catch(e){ console.error("templates",e); return res.status(500).json({ok:false,error:e.message}); }
@@ -571,6 +625,7 @@ router.post("/twilio/inbound",async(req,res)=>{
     const msgRef=convoRef.collection("messages").doc(sid);
     let duplicate=false;
     let shouldBot=false;
+    let isNewConversation=false;
     await inboxDb.runTransaction(async tx=>{
       const [convoSnap,msgSnap]=await Promise.all([tx.get(convoRef),tx.get(msgRef)]);
       if(msgSnap.exists){ duplicate=true; return; }
@@ -591,6 +646,7 @@ router.post("/twilio/inbound",async(req,res)=>{
       Object.keys(patch).forEach(k=>patch[k]===undefined&&delete patch[k]);
       const currentMode=convoSnap.exists ? normalizeMode((convoSnap.data()||{}).mode) : (dialogflow.configured()?"BOT":"HUMAN");
       shouldBot=currentMode==="BOT";
+      isNewConversation=!convoSnap.exists;
       if(!convoSnap.exists){
         patch.createdAt=now;patch.mode=currentMode;patch.stage="nuevo";patch.ownerEmail="";patch.isAssigned=false;patch.isLinked=false;
       }
@@ -601,6 +657,18 @@ router.post("/twilio/inbound",async(req,res)=>{
       tx.set(convoRef,patch,{merge:true});
     });
     if(!duplicate){try{await touchLine(to,{source:"twilio-inbound"});}catch(lineErr){console.warn("line catalog inbound",lineErr.message)}}
+    if(!duplicate && isNewConversation){
+      try{
+        const siblings=await inboxDb.collection("conversations").where("waFrom","==",from).limit(20).get();
+        const ids=siblings.docs.map(d=>d.id);
+        const lines=uniqueStrings(siblings.docs.map(d=>{const x=d.data()||{};return normalizedLine(x.inboundTo||x.lineId||"");})).filter(Boolean);
+        if(lines.length>1 && siblings.size>1){
+          const batch=inboxDb.batch();
+          siblings.docs.forEach(d=>batch.set(d.ref,{duplicateConversationIds:ids.filter(x=>x!==d.id),linkedLineIds:lines,multiLineDetected:true,multiLineCount:lines.length,multiLineUpdatedAt:FieldValue.serverTimestamp()},{merge:true}));
+          await batch.commit();
+        }
+      }catch(linkErr){console.warn("multi-line auto-link",linkErr.message)}
+    }
     let botResult={skipped:true};
     if(!duplicate && shouldBot){
       botResult=await processBotInbound({conversationId,convoRef,from,to,body,inboundSid:sid});

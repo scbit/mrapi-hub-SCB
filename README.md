@@ -1,8 +1,8 @@
-# MR API HUB v1.5.6
+# MR API HUB v1.5.7
 
 **Base:** v1.5.3 Inbox Live.
 
-### Novedades v1.5.6
+### Novedades v1.5.7
 - Audios, PDFs, imágenes y adjuntos visibles/abribles desde la Bandeja.
 - Cache de media entrante en el bucket del tenant al primer acceso.
 - Scroll inteligente: no vuelve abajo si el usuario está leyendo historial.
@@ -10,7 +10,7 @@
 - Administración de múltiples líneas por contacto: descubrir, vincular y elegir línea de respuesta.
 - Mismo código multi-tenant para SCB, Ar-Tec y futuros clientes.
 
-Ver `docs/V1.5.6.md`.
+Ver `docs/V1.5.7.md`.
 
 # MR API HUB v1.5.3 — Multi-tenant + WhatsApp inbound
 
@@ -147,7 +147,7 @@ Cuando una conversación está en `BOT` y están configuradas `DF_PROJECT_ID`, `
 - Al volver a una pestaña oculta hace una sincronización inmediata con pequeño solapamiento para evitar perder eventos.
 - Respeta filtros de owner y permisos del backend.
 
-## v1.5.6 — Desk + Read state + Line catalog
+## v1.5.7 — Desk + Read state + Line catalog
 
 ### Desk
 - El botón `Desk` de la navegación abre `MRAPI_DESK_BASE_URL` directamente.
@@ -185,3 +185,16 @@ El modal `Líneas` ahora combina:
 - líneas globales activas del tenant.
 
 Por lo tanto se puede elegir como `preferredLineId` una línea habilitada aunque ese contacto todavía no haya hablado por ella. `Vincular conversaciones detectadas` sigue agrupando solamente conversaciones históricas reales del mismo teléfono.
+
+
+## v1.5.7 — Desk SSO + Multi-line Alert
+
+- HUB → Desk SSO using the authenticated MR API user.
+- Configure the exact same `DESK_SSO_SECRET` in MR API HUB and SCB Desk.
+- `DESK_SSO_TTL_SECONDS` defaults to 60 seconds.
+- New WhatsApp conversations automatically detect the same customer across multiple receiving lines and materialize `linkedLineIds` / `duplicateConversationIds`.
+- Existing historical conversations are repaired on first open through the lightweight line-alert endpoint.
+- Inbox list shows a `N líneas` warning badge and the open chat shows a persistent multi-line warning.
+- The alert links directly to the existing Lines manager, where the operator can inspect conversations and choose the preferred outbound line.
+
+SSO does not share browser cookies across Cloud Run domains. The HUB creates a short-lived signed handoff token that Desk validates at `/auth/crm`.

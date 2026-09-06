@@ -17,6 +17,8 @@ module.exports = Object.freeze({
   filesBucket: String(process.env.MRAPI_FILES_BUCKET || "").trim(),
   deskDb: String(process.env.MRAPI_DESK_DB || (isScb?"scb-desk":"")).trim(),
   deskBaseUrl: String(process.env.MRAPI_DESK_BASE_URL || process.env.DESK_BASE_URL || (isScb?"https://scb-desk-604957912671.us-central1.run.app":"")).replace(/\/$/, ""),
+  deskSsoSecret: String(process.env.DESK_SSO_SECRET || "").trim(),
+  deskSsoTtlSeconds: intEnv("DESK_SSO_TTL_SECONDS", 60, 15, 300),
   tenantCacheMs: intEnv("MRAPI_TENANT_CACHE_MS", 300000, 10000, 3600000),
   authCacheMs: intEnv("MRAPI_AUTH_CACHE_MS", 60000, 5000, 300000),
   inboxPageSize: intEnv("MRAPI_INBOX_PAGE_SIZE", 50, 10, 100),

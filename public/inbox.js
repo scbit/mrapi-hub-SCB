@@ -87,6 +87,7 @@
       state.selected.lineCount=Number(d.count||1);
       state.selected.linkedLineIds=d.linkedLineIds||[];
       state.selected.duplicateConversationIds=(d.conversationIds||[]).filter(x=>x!==state.selected.id);
+      state.selected.otherLineConversations=d.otherLineConversations||[];
       const idx=state.items.findIndex(x=>x.id===state.selected.id);if(idx>=0)state.items[idx]={...state.items[idx],...state.selected};
       paintMultiLineAlert();renderList();metrics();
     }catch(e){console.warn('multi-line alert',e.message)}

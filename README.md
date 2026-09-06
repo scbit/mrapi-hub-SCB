@@ -1,8 +1,8 @@
-# MR API HUB v1.5.8
+# MR API HUB v1.5.9
 
 **Base:** v1.5.3 Inbox Live.
 
-### Novedades v1.5.8
+### Novedades v1.5.9
 - Audios, PDFs, imágenes y adjuntos visibles/abribles desde la Bandeja.
 - Cache de media entrante en el bucket del tenant al primer acceso.
 - Scroll inteligente: no vuelve abajo si el usuario está leyendo historial.
@@ -10,7 +10,7 @@
 - Administración de múltiples líneas por contacto: descubrir, vincular y elegir línea de respuesta.
 - Mismo código multi-tenant para SCB, Ar-Tec y futuros clientes.
 
-Ver `docs/V1.5.8.md`.
+Ver `docs/V1.5.9.md`.
 
 # MR API HUB v1.5.3 — Multi-tenant + WhatsApp inbound
 
@@ -147,7 +147,7 @@ Cuando una conversación está en `BOT` y están configuradas `DF_PROJECT_ID`, `
 - Al volver a una pestaña oculta hace una sincronización inmediata con pequeño solapamiento para evitar perder eventos.
 - Respeta filtros de owner y permisos del backend.
 
-## v1.5.8 — Desk + Read state + Line catalog
+## v1.5.9 — Desk + Read state + Line catalog
 
 ### Desk
 - El botón `Desk` de la navegación abre `MRAPI_DESK_BASE_URL` directamente.
@@ -187,7 +187,7 @@ El modal `Líneas` ahora combina:
 Por lo tanto se puede elegir como `preferredLineId` una línea habilitada aunque ese contacto todavía no haya hablado por ella. `Vincular conversaciones detectadas` sigue agrupando solamente conversaciones históricas reales del mismo teléfono.
 
 
-## v1.5.8 — Desk SSO + Multi-line Alert
+## v1.5.9 — Desk SSO + Multi-line Alert
 
 - HUB → Desk SSO using the authenticated MR API user.
 - Configure the exact same `DESK_SSO_SECRET` in MR API HUB and SCB Desk.
@@ -200,8 +200,17 @@ Por lo tanto se puede elegir como `preferredLineId` una línea habilitada aunque
 SSO does not share browser cookies across Cloud Run domains. The HUB creates a short-lived signed handoff token that Desk validates at `/auth/crm`.
 
 
-## v1.5.8 — Legacy Desk SSO + real multi-line dedupe
+## v1.5.9 — Legacy Desk SSO + real multi-line dedupe
 - Desk SSO token contract now matches legacy CRM exactly (no tenantId in payload; legacy role normalization).
 - Multi-line detection canonicalizes WhatsApp numbers by digits before counting.
 - Same line in different formats no longer creates false 2-line alerts.
 - Historical stale multi-line flags are cleared when a re-check finds one real line.
+
+## v1.5.9 — Legacy-compatible multi-line detection
+- Multi-line lookup now follows the proven legacy HUB/CRM strategy.
+- Searches normalized customer phone across customerPhone, phone, waFrom, from and contactPhone.
+- Checks historical formatting variants (digits, +digits, whatsapp:+digits).
+- Excludes the current line after normalization.
+- Applies owner visibility rules.
+- Does not scan the full conversations collection.
+- Materializes the resulting linked lines only on the opened conversation.

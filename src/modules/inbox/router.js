@@ -60,6 +60,82 @@ function canonicalLines(values){
   }
   return out;
 }
+
+function normalizedCustomerPhone(v){ return digits(v); }
+function conversationCustomerPhone(d={}, id=""){
+  const direct=normalizedCustomerPhone(d.waFrom||d.from||d.phone||d.customerPhone||d.contactPhone||"");
+  if(direct) return direct;
+  const raw=String(id||d.id||"").replace(/^whatsapp:/i,"").replace(/\+/g,"").trim();
+  if(!raw) return "";
+  const parts=raw.split(/__+|[_|]/g).map(normalizedCustomerPhone).filter(Boolean);
+  return parts[0]||normalizedCustomerPhone(raw);
+}
+function conversationLine(d={}, id=""){
+  const direct=normalizedLine(d.lineId||d.inboundTo||d.preferredLineId||"");
+  if(direct) return direct;
+  const raw=String(id||d.id||"").replace(/^whatsapp:/i,"").replace(/\+/g,"").trim();
+  const parts=raw.split(/__+|[_|]/g).map(normalizedCustomerPhone).filter(Boolean);
+  return parts[1]?normalizedLine(parts[1]):"";
+}
+async function findOtherLineConversations(phoneRaw,currentLineRaw,user,{limit=20}={}){
+  const phone=normalizedCustomerPhone(phoneRaw);
+  if(!phone) return {items:[],reads:0};
+  const currentLine=conversationLine({lineId:currentLineRaw});
+  const max=Math.max(1,Math.min(Number(limit||20),25));
+  const candidates=new Map();
+  let reads=0;
+
+  const addDocs=(snap)=>{
+    reads+=snap.size;
+    for(const doc of snap.docs){
+      if(candidates.size>=max) break;
+      if(candidates.has(doc.id)) continue;
+      const d=doc.data()||{};
+      if(conversationCustomerPhone(d,doc.id)!==phone) continue;
+      const line=conversationLine(d,doc.id);
+      if(currentLine && line && digits(line)===digits(currentLine)) continue;
+      candidates.set(doc.id,{id:doc.id,...d,_line:line});
+    }
+  };
+
+  // Preserve the legacy strategy: query the normalized customer phone through the
+  // historical field names rather than trusting only waFrom.
+  const values=[phone,`+${phone}`,`whatsapp:+${phone}`];
+  const fields=["customerPhone","phone","waFrom","from","contactPhone"];
+  for(const field of fields){
+    if(candidates.size>=max) break;
+    for(const value of values){
+      if(candidates.size>=max) break;
+      try{
+        const snap=await inboxDb.collection("conversations")
+          .where(field,"==",value)
+          .limit(Math.min(10,max-candidates.size))
+          .get();
+        addDocs(snap);
+      }catch(err){
+        console.warn("multi-line query skipped",field,err.message||String(err));
+      }
+    }
+  }
+
+  const allowed=await visibleOwners(user);
+  const canSeeAll=allowed===null;
+  const visibleSet=new Set(Array.isArray(allowed)?allowed.map(x=>String(x||"").trim().toLowerCase()).filter(Boolean):[]);
+  const items=[];
+  for(const item of candidates.values()){
+    const owner=String(item.ownerEmail||item.owner||"").trim().toLowerCase();
+    if(!canSeeAll && owner && !visibleSet.has(owner)) continue;
+    items.push({
+      id:item.id,
+      lineId:item._line||conversationLine(item,item.id),
+      ownerEmail:owner,
+      mode:String(item.mode||"BOT").toUpperCase(),
+      stage:item.stage||item.dealStage||"nuevo",
+      lastMessagePreview:item.lastMessagePreview||item.lastMessage||item.lastMessageText||""
+    });
+  }
+  return {items,reads};
+}
 function lineDocId(v){ const d=digits(v); return d || crypto.createHash("sha1").update(String(v||"")).digest("hex").slice(0,24); }
 async function touchLine(lineId,{label="",source="observed"}={}){
   const normalized=normalizedLine(lineId); if(!normalized) return null;
@@ -476,33 +552,41 @@ router.get("/conversations/:id/line-alert",authRequired,async(req,res)=>{
     const selected=await ref.get();
     if(!selected.exists) return res.status(404).json({ok:false,error:"Conversación no encontrada"});
     const c=selected.data()||{};
-    const existingLines=canonicalLines([c.lineId||c.inboundTo||"", ...(c.linkedLineIds||[])]);
-    if(existingLines.length>1){
-      return res.json({ok:true,multiple:true,count:existingLines.length,linkedLineIds:existingLines,conversationIds:uniqueStrings([id,...(c.duplicateConversationIds||[])]),readsEstimate:1,writesEstimate:0,cached:true});
-    }
-    const waFrom=String(c.waFrom||"");
-    if(!waFrom) return res.json({ok:true,multiple:false,count:existingLines.length||1,linkedLineIds:existingLines,conversationIds:[id],readsEstimate:1,writesEstimate:0});
-    const snap=await inboxDb.collection("conversations").where("waFrom","==",waFrom).limit(20).get();
-    const ids=snap.docs.map(d=>d.id);
-    const lines=canonicalLines(snap.docs.map(d=>{const x=d.data()||{};return x.inboundTo||x.lineId||"";}));
-    let writes=0;
-    if(snap.size){
-      const isMulti=lines.length>1 && snap.size>1;
-      const batch=inboxDb.batch();
-      snap.docs.forEach(d=>{
-        batch.set(d.ref,{
-          duplicateConversationIds:isMulti?ids.filter(x=>x!==d.id):[],
-          linkedLineIds:lines,
-          multiLineDetected:isMulti,
-          multiLineCount:Math.max(1,lines.length),
-          multiLineUpdatedAt:FieldValue.serverTimestamp()
-        },{merge:true});
-        writes++;
-      });
-      await batch.commit();
-    }
-    return res.json({ok:true,multiple:lines.length>1,count:Math.max(1,lines.length),linkedLineIds:lines,conversationIds:lines.length>1?ids:[id],readsEstimate:1+snap.size,writesEstimate:writes,cached:false});
-  }catch(e){console.error("line alert",e);return res.status(500).json({ok:false,error:e.message});}
+    const customerPhone=conversationCustomerPhone(c,id);
+    const currentLine=conversationLine(c,id);
+    const existingLines=canonicalLines([currentLine,...(c.linkedLineIds||[])]);
+
+    const found=await findOtherLineConversations(customerPhone,currentLine,req.authUser,{limit:20});
+    const otherLines=canonicalLines(found.items.map(x=>x.lineId));
+    const lines=canonicalLines([currentLine,...existingLines,...otherLines]);
+    const allIds=uniqueStrings([id,...found.items.map(x=>x.id)]);
+    const isMulti=lines.length>1;
+
+    // Materialize only the selected conversation. We don't rewrite every historical
+    // conversation just to render an alert.
+    await ref.set({
+      duplicateConversationIds:isMulti?allIds.filter(x=>x!==id):[],
+      linkedLineIds:lines,
+      multiLineDetected:isMulti,
+      multiLineCount:Math.max(1,lines.length),
+      multiLineUpdatedAt:FieldValue.serverTimestamp()
+    },{merge:true});
+
+    return res.json({
+      ok:true,
+      multiple:isMulti,
+      count:Math.max(1,lines.length),
+      linkedLineIds:lines,
+      conversationIds:isMulti?allIds:[id],
+      otherLineConversations:found.items,
+      readsEstimate:1+found.reads,
+      writesEstimate:1,
+      cached:false
+    });
+  }catch(e){
+    console.error("line alert",e);
+    return res.status(500).json({ok:false,error:e.message});
+  }
 });
 
 router.get("/conversations/:id/messages/:messageId/media/:index",authRequired,async(req,res)=>{

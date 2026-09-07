@@ -11,7 +11,7 @@ const router=express.Router();
 router.use(authRequired);
 
 function ts(v){if(!v)return null;if(v.toDate)return v.toDate().toISOString();if(v instanceof Date)return v.toISOString();return v;}
-function enc(doc){if(!doc)return "";const d=doc.data()||{};return Buffer.from(JSON.stringify({id:doc.id,createdAt:ts(d.createdAt)})).toString("base64url");}
+function enc(doc){if(!doc)return "";const d=doc.data()||{};return Buffer.from(JSON.stringify({id:doc.id,createdAt:ts(d.createdAt),dueDate:String(d.dueDate||"")})).toString("base64url");}
 function dec(v){try{return JSON.parse(Buffer.from(String(v||""),"base64url").toString("utf8"));}catch{return null;}}
 function normalizeDoc(doc){const d=doc.data()||{};return {id:doc.id,...d,createdAt:ts(d.createdAt),updatedAt:ts(d.updatedAt)};}
 function publicDeal(doc,contact){const d=normalizeDoc(doc);return {...d,contactPhone:String(contact?.phone||d.contactPhone||""),company:String(contact?.company||d.company||"")};}
@@ -62,7 +62,7 @@ router.delete("/views/:id",async(req,res)=>{
 });
 router.post("/deals/bulk-stage",async(req,res)=>{
   try{
-    const ids=Array.from(new Set((Array.isArray(req.body?.ids)?req.body.ids:[]).map(x=>String(x||"").trim()).filter(Boolean))).slice(0,100);
+    const ids=Array.from(new Set((Array.isArray(req.body?.ids)?req.body.ids:[]).map(x=>String(x||"").trim()).filter(Boolean))).slice(0,450);
     const stage=String(req.body?.stage||"").trim(); if(!ids.length)return res.status(400).json({ok:false,error:"No hay tratos seleccionados"}); if(!PIPELINE_STAGES.includes(stage))return res.status(400).json({ok:false,error:"Etapa inválida"});
     const refs=ids.map(id=>crmDb.collection("deals").doc(id)); const docs=await crmDb.getAll(...refs); const allowed=[];
     for(const d of docs){if(d.exists&&await canEditOwner(req.authUser,(d.data()||{}).owner))allowed.push(d.ref);}
@@ -74,26 +74,55 @@ router.post("/deals/bulk-stage",async(req,res)=>{
 
 router.get("/deals",async(req,res)=>{
   try{
-    const limit=cleanLimit(req.query.limit,50), stage=String(req.query.stage||"").trim(), owner=String(req.query.owner||"").trim().toLowerCase(), dealType=String(req.query.dealType||"").trim(), cursor=dec(req.query.cursor);
+    const limit=cleanLimit(req.query.limit,50),
+      stage=String(req.query.stage||"").trim(),
+      owner=String(req.query.owner||"").trim().toLowerCase(),
+      dealType=String(req.query.dealType||"").trim(),
+      overdueDays=Math.max(0,Math.min(3650,Number(req.query.overdueDays||0)||0)),
+      cursor=dec(req.query.cursor);
     const visible=await visibleOwners(req.authUser);
     if(owner&&visible!==null&&!visible.includes(owner))return res.status(403).json({ok:false,error:"Owner fuera de tus permisos"});
+
     let q=crmDb.collection("deals");
     if(stage)q=q.where("stage","==",stage);
     if(dealType)q=q.where("dealType","==",dealType);
     if(owner)q=q.where("owner","==",owner);
     else if(Array.isArray(visible)&&visible.length===1)q=q.where("owner","==",visible[0]);
     else if(Array.isArray(visible)&&visible.length>1&&visible.length<=10)q=q.where("owner","in",visible);
-    // Si un líder tiene >10 vendedores, exigimos owner explícito en vez de escanear toda la colección.
     else if(Array.isArray(visible)&&visible.length>10)return res.status(400).json({ok:false,error:"Seleccioná un vendedor para listar el pipeline"});
-    q=q.orderBy("createdAt","desc").orderBy(admin.firestore.FieldPath.documentId(),"desc");
-    if(cursor?.createdAt&&cursor?.id)q=q.startAfter(new Date(cursor.createdAt),cursor.id);
+
+    if(overdueDays){
+      const cutoff=new Date();
+      cutoff.setHours(0,0,0,0);
+      cutoff.setDate(cutoff.getDate()-overdueDays);
+      const cutoffStr=cutoff.toISOString().slice(0,10);
+      q=q.where("dueDate","<=",cutoffStr).orderBy("dueDate","asc").orderBy(admin.firestore.FieldPath.documentId(),"asc");
+      if(cursor?.dueDate&&cursor?.id)q=q.startAfter(String(cursor.dueDate),cursor.id);
+    }else{
+      q=q.orderBy("createdAt","desc").orderBy(admin.firestore.FieldPath.documentId(),"desc");
+      if(cursor?.createdAt&&cursor?.id)q=q.startAfter(new Date(cursor.createdAt),cursor.id);
+    }
+
     const snap=await q.limit(limit).get();
     const contactIds=Array.from(new Set(snap.docs.map(d=>String((d.data()||{}).contactId||"")).filter(Boolean)));
     const contactDocs=contactIds.length?await crmDb.getAll(...contactIds.map(id=>crmDb.collection("contacts").doc(id))):[];
     const cmap=new Map(contactDocs.map(d=>[d.id,d.exists?(d.data()||{}):{}]));
     const items=snap.docs.map(d=>publicDeal(d,cmap.get(String((d.data()||{}).contactId||""))));
-    return res.json({ok:true,items,nextCursor:snap.size===limit?enc(snap.docs[snap.docs.length-1]):"",hasMore:snap.size===limit,readsEstimate:snap.size+contactDocs.length});
-  }catch(e){console.error("crm deals",e);const msg=/index/i.test(String(e.message||""))?"Firestore requiere un índice para este filtro. No se hizo fallback masivo.":e.message;return res.status(500).json({ok:false,error:msg});}
+    return res.json({
+      ok:true,
+      items,
+      overdueDays,
+      nextCursor:snap.size===limit?enc(snap.docs[snap.docs.length-1]):"",
+      hasMore:snap.size===limit,
+      readsEstimate:snap.size+contactDocs.length
+    });
+  }catch(e){
+    console.error("crm deals",e);
+    const msg=/index/i.test(String(e.message||""))
+      ?"Firestore requiere un índice para combinar Vencidos +15 con estos filtros. No se hizo fallback masivo."
+      :e.message;
+    return res.status(500).json({ok:false,error:msg});
+  }
 });
 
 router.get("/deals/:id",async(req,res)=>{try{const d=await crmDb.collection("deals").doc(req.params.id).get();if(!d.exists)return res.status(404).json({ok:false,error:"Trato no encontrado"});const data=d.data()||{};if(!(await canSeeOwner(req.authUser,data.owner)))return res.status(403).json({ok:false,error:"Sin permiso"});let c=null,reads=1;if(data.contactId){const x=await crmDb.collection("contacts").doc(data.contactId).get();reads++;if(x.exists)c={id:x.id,...x.data()};}res.json({ok:true,item:normalizeDoc(d),contact:c,readsEstimate:reads});}catch(e){res.status(500).json({ok:false,error:e.message});}});

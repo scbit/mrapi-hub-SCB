@@ -228,3 +228,12 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Composer stays visible at normal height.
 - Prevents the ad card from shrinking the chat.
 - Mobile layout adjusted separately.
+
+## v1.5.12 — Bulk toolbar + Vencidos +15
+- Bulk action toolbar is sticky and stays visible above the Kanban after selecting deals.
+- New `Vencidos +15 días` pipeline filter backed by Firestore `dueDate`.
+- Shows overdue age in days on cards/list.
+- `Seleccionar cargados` selects all currently loaded filtered deals.
+- Bulk move now asks for confirmation and supports up to 450 selected deals per operation.
+- Saved views preserve the +15-day filter.
+- No collection-wide fallback scan is used.

@@ -30,3 +30,31 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
 
 /* v1.3 CRM modules */
 .crmModuleBar{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 12px}.crmModuleBar a{text-decoration:none;color:#475467;background:#fff;border:1px solid #e7ebef;padding:7px 10px;border-radius:999px;font-size:10px;font-weight:800}.crmModuleBar a.active{background:#edf8ea;color:#2d8f25;border-color:#cee8c9}@media(max-width:800px){.crmModuleBar{overflow:auto;flex-wrap:nowrap}.crmModuleBar a{white-space:nowrap}}
+
+/* v1.5.12 — bulk actions + overdue 15 days */
+.bulkbar{
+  position:sticky;
+  top:8px;
+  z-index:55;
+  display:flex;
+  align-items:center;
+  gap:10px;
+  background:#111827;
+  color:#fff;
+  border-radius:13px;
+  padding:10px 12px;
+  margin:0 0 12px;
+  box-shadow:0 12px 28px rgba(17,24,39,.20);
+}
+.bulkbar.hidden{display:none!important}
+.bulkbar strong{font-size:14px;white-space:nowrap}
+.bulkbar .bulkHint{font-size:12px;color:#d7dce5;white-space:nowrap}
+.bulkbar select{min-width:220px}
+#overdueAge[value="15"]{border-color:#e6942e;background:#fff8ed}
+.due.overdue{font-weight:850}
+@media(max-width:850px){
+  .bulkbar{top:6px;flex-wrap:wrap}
+  .bulkbar .bulkHint{display:none}
+  .bulkbar select{min-width:0;flex:1}
+  .bulkbar .btn{flex:1}
+}

@@ -257,3 +257,9 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Added `RECOVERY +15 DIAS` as the final CRM pipeline stage.
 - It appears at the end of the Kanban and in bulk-move destination selectors.
 - Intended workflow: filter Vencidos +15 días → select deals → move to RECOVERY +15 DIAS.
+
+## v1.5.16 — Bulk bar attached to Kanban
+- Removed the fixed-bottom floating bar and the excessive bottom whitespace it created.
+- Bulk actions now sit centered directly above the Kanban.
+- The bar remains sticky while scrolling but does not cover stage headers.
+- Preserves the v1.5.14 stage-scroll restoration when loading more cards.

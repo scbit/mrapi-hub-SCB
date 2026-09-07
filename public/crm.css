@@ -33,66 +33,6 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
 
 
 
-/* v1.5.14 — fixed bottom bulk actions + stable Kanban scrolling */
-.crm-main{
-  padding-bottom:170px;
-}
-.bulkbar{
-  position:fixed;
-  left:50%;
-  bottom:18px;
-  transform:translateX(-50%);
-  z-index:90;
-  width:max-content;
-  max-width:calc(100vw - 40px);
-  display:flex;
-  align-items:center;
-  gap:9px;
-  margin:0;
-  padding:10px 12px;
-  color:#202939;
-  background:rgba(255,255,255,.98);
-  border:1px solid #dfe3ea;
-  border-radius:15px;
-  box-shadow:0 16px 42px rgba(17,24,39,.22);
-  backdrop-filter:blur(10px);
-}
-.bulkbar.hidden{display:none!important}
-.bulkbar strong{
-  padding:7px 10px;
-  border-radius:10px;
-  background:#111827;
-  color:#fff;
-  font-size:12px;
-  white-space:nowrap;
-}
-.bulkbar .bulkHint{
-  color:#667085;
-  font-size:12px;
-  white-space:nowrap;
-}
-.bulkbar select{
-  min-width:230px;
-  max-width:320px;
-  border:1px solid #dfe3ea;
-  border-radius:10px;
-  padding:9px 10px;
-  background:#fff;
-}
-.bulkbar .btn{
-  white-space:nowrap;
-}
-.bulkbar .btn.ghost{
-  color:#596273;
-  border-color:#dfe3ea;
-  background:#fff;
-}
-#overdueAge[value="15"]{
-  border-color:#e6942e;
-  background:#fff8ed;
-}
-.due.overdue{font-weight:850}
-
 /* Keep the board usable while the action bar is open. */
 .kanban-wrap{
   scroll-behavior:auto;
@@ -103,7 +43,7 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
 }
 
 @media(max-width:850px){
-  .crm-main{padding-bottom:210px}
+  
   .bulkbar{
     left:8px;
     right:8px;
@@ -118,6 +58,85 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
     min-width:0;
     max-width:none;
     flex:1 1 180px;
+  }
+  .bulkbar .btn{flex:1 1 auto}
+}
+
+/* v1.5.16 — bulk actions attached to board, no dead space */
+.crm-main{
+  padding-bottom:90px;
+}
+.bulkbar{
+  position:sticky;
+  top:74px;
+  z-index:58;
+  width:max-content;
+  max-width:calc(100% - 24px);
+  display:flex;
+  align-items:center;
+  gap:9px;
+  margin:0 auto 10px;
+  padding:9px 11px;
+  color:#202939;
+  background:#fff;
+  border:1px solid #dfe3ea;
+  border-radius:13px;
+  box-shadow:0 8px 22px rgba(17,24,39,.12);
+}
+.bulkbar.hidden{display:none!important}
+.bulkbar strong{
+  padding:6px 9px;
+  border-radius:9px;
+  background:#111827;
+  color:#fff;
+  font-size:12px;
+  white-space:nowrap;
+}
+.bulkbar .bulkHint{
+  color:#667085;
+  font-size:12px;
+  white-space:nowrap;
+}
+.bulkbar select{
+  min-width:220px;
+  max-width:320px;
+  border:1px solid #dfe3ea;
+  border-radius:9px;
+  padding:8px 9px;
+  background:#fff;
+}
+.bulkbar .btn{
+  white-space:nowrap;
+}
+.bulkbar .btn.ghost{
+  color:#596273;
+  border-color:#dfe3ea;
+  background:#fff;
+}
+
+/* Keep Kanban exactly below the bulk card */
+.kanban-wrap{
+  margin-top:0;
+  scroll-behavior:auto;
+  padding-bottom:9px;
+}
+.column-body{
+  overscroll-behavior:contain;
+}
+
+@media(max-width:850px){
+  .bulkbar{
+    top:64px;
+    width:calc(100% - 16px);
+    max-width:none;
+    margin:0 8px 8px;
+    flex-wrap:wrap;
+  }
+  .bulkbar .bulkHint{display:none}
+  .bulkbar select{
+    min-width:0;
+    max-width:none;
+    flex:1 1 170px;
   }
   .bulkbar .btn{flex:1 1 auto}
 }

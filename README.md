@@ -237,3 +237,11 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Bulk move now asks for confirmation and supports up to 450 selected deals per operation.
 - Saved views preserve the +15-day filter.
 - No collection-wide fallback scan is used.
+
+## v1.5.13 — Bulk UI + Firestore indexes for Vencidos +15
+- Bulk actions are now a compact centered card instead of a full-width black strip.
+- The card remains visible without visually covering the Kanban headers.
+- Added composite Firestore indexes for all supported Vencidos +15 combinations:
+  owner, stage, dealType and their combinations with dueDate.
+- Missing-index message is now operational/friendly instead of exposing an internal fallback warning.
+- `firestore.indexes.json` contains the required definitions. These indexes must be deployed/created once in the CRM Firestore database.

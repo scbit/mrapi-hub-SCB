@@ -31,30 +31,64 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
 /* v1.3 CRM modules */
 .crmModuleBar{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 12px}.crmModuleBar a{text-decoration:none;color:#475467;background:#fff;border:1px solid #e7ebef;padding:7px 10px;border-radius:999px;font-size:10px;font-weight:800}.crmModuleBar a.active{background:#edf8ea;color:#2d8f25;border-color:#cee8c9}@media(max-width:800px){.crmModuleBar{overflow:auto;flex-wrap:nowrap}.crmModuleBar a{white-space:nowrap}}
 
-/* v1.5.12 — bulk actions + overdue 15 days */
+
+/* v1.5.13 — compact bulk action card */
 .bulkbar{
   position:sticky;
-  top:8px;
-  z-index:55;
+  top:76px;
+  z-index:54;
+  width:max-content;
+  max-width:calc(100% - 24px);
   display:flex;
   align-items:center;
-  gap:10px;
-  background:#111827;
-  color:#fff;
-  border-radius:13px;
-  padding:10px 12px;
-  margin:0 0 12px;
-  box-shadow:0 12px 28px rgba(17,24,39,.20);
+  gap:9px;
+  margin:4px auto 14px;
+  padding:9px 11px;
+  color:#202939;
+  background:#fff;
+  border:1px solid #dfe3ea;
+  border-radius:14px;
+  box-shadow:0 10px 28px rgba(17,24,39,.13);
 }
 .bulkbar.hidden{display:none!important}
-.bulkbar strong{font-size:14px;white-space:nowrap}
-.bulkbar .bulkHint{font-size:12px;color:#d7dce5;white-space:nowrap}
-.bulkbar select{min-width:220px}
+.bulkbar strong{
+  padding:6px 9px;
+  border-radius:9px;
+  background:#111827;
+  color:#fff;
+  font-size:12px;
+  white-space:nowrap;
+}
+.bulkbar .bulkHint{
+  color:#667085;
+  font-size:12px;
+  white-space:nowrap;
+}
+.bulkbar select{
+  min-width:210px;
+  max-width:300px;
+  border:1px solid #dfe3ea;
+  border-radius:9px;
+  padding:8px 9px;
+  background:#fff;
+}
+.bulkbar .btn{white-space:nowrap}
+.bulkbar .btn.ghost{
+  color:#596273;
+  border-color:#dfe3ea;
+  background:#fff;
+}
 #overdueAge[value="15"]{border-color:#e6942e;background:#fff8ed}
 .due.overdue{font-weight:850}
 @media(max-width:850px){
-  .bulkbar{top:6px;flex-wrap:wrap}
+  .bulkbar{
+    top:64px;
+    width:calc(100% - 16px);
+    max-width:none;
+    margin:4px 8px 10px;
+    flex-wrap:wrap;
+  }
   .bulkbar .bulkHint{display:none}
-  .bulkbar select{min-width:0;flex:1}
+  .bulkbar select{min-width:0;max-width:none;flex:1}
   .bulkbar .btn{flex:1}
 }

@@ -119,7 +119,7 @@ router.get("/deals",async(req,res)=>{
   }catch(e){
     console.error("crm deals",e);
     const msg=/index/i.test(String(e.message||""))
-      ?"Firestore requiere un índice para combinar Vencidos +15 con estos filtros. No se hizo fallback masivo."
+      ?"El filtro Vencidos +15 necesita terminar de activar un índice de Firestore para esta combinación de filtros. Los índices requeridos están incluidos en esta versión."
       :e.message;
     return res.status(500).json({ok:false,error:msg});
   }

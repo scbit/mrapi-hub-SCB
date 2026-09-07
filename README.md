@@ -252,3 +252,8 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Bulk actions now live in a fixed bottom floating bar, independent from Kanban rendering.
 - Added bottom workspace padding so the floating bar does not cover deal cards.
 - Mobile gets a separate fixed position above the bottom navigation.
+
+## v1.5.15 — RECOVERY +15 DIAS
+- Added `RECOVERY +15 DIAS` as the final CRM pipeline stage.
+- It appears at the end of the Kanban and in bulk-move destination selectors.
+- Intended workflow: filter Vencidos +15 días → select deals → move to RECOVERY +15 DIAS.

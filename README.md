@@ -245,3 +245,10 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
   owner, stage, dealType and their combinations with dueDate.
 - Missing-index message is now operational/friendly instead of exposing an internal fallback warning.
 - `firestore.indexes.json` contains the required definitions. These indexes must be deployed/created once in the CRM Firestore database.
+
+## v1.5.14 — Preserve stage scroll + fixed bottom bulk bar
+- `Cargar más de esta etapa` preserves the Kanban horizontal position.
+- It also preserves the stage scroll relative to the bottom, so repeated loading stays where the user clicked instead of jumping to the top.
+- Bulk actions now live in a fixed bottom floating bar, independent from Kanban rendering.
+- Added bottom workspace padding so the floating bar does not cover deal cards.
+- Mobile gets a separate fixed position above the bottom navigation.

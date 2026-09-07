@@ -32,28 +32,35 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
 .crmModuleBar{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 12px}.crmModuleBar a{text-decoration:none;color:#475467;background:#fff;border:1px solid #e7ebef;padding:7px 10px;border-radius:999px;font-size:10px;font-weight:800}.crmModuleBar a.active{background:#edf8ea;color:#2d8f25;border-color:#cee8c9}@media(max-width:800px){.crmModuleBar{overflow:auto;flex-wrap:nowrap}.crmModuleBar a{white-space:nowrap}}
 
 
-/* v1.5.13 — compact bulk action card */
+
+/* v1.5.14 — fixed bottom bulk actions + stable Kanban scrolling */
+.crm-main{
+  padding-bottom:170px;
+}
 .bulkbar{
-  position:sticky;
-  top:76px;
-  z-index:54;
+  position:fixed;
+  left:50%;
+  bottom:18px;
+  transform:translateX(-50%);
+  z-index:90;
   width:max-content;
-  max-width:calc(100% - 24px);
+  max-width:calc(100vw - 40px);
   display:flex;
   align-items:center;
   gap:9px;
-  margin:4px auto 14px;
-  padding:9px 11px;
+  margin:0;
+  padding:10px 12px;
   color:#202939;
-  background:#fff;
+  background:rgba(255,255,255,.98);
   border:1px solid #dfe3ea;
-  border-radius:14px;
-  box-shadow:0 10px 28px rgba(17,24,39,.13);
+  border-radius:15px;
+  box-shadow:0 16px 42px rgba(17,24,39,.22);
+  backdrop-filter:blur(10px);
 }
 .bulkbar.hidden{display:none!important}
 .bulkbar strong{
-  padding:6px 9px;
-  border-radius:9px;
+  padding:7px 10px;
+  border-radius:10px;
   background:#111827;
   color:#fff;
   font-size:12px;
@@ -65,30 +72,52 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
   white-space:nowrap;
 }
 .bulkbar select{
-  min-width:210px;
-  max-width:300px;
+  min-width:230px;
+  max-width:320px;
   border:1px solid #dfe3ea;
-  border-radius:9px;
-  padding:8px 9px;
+  border-radius:10px;
+  padding:9px 10px;
   background:#fff;
 }
-.bulkbar .btn{white-space:nowrap}
+.bulkbar .btn{
+  white-space:nowrap;
+}
 .bulkbar .btn.ghost{
   color:#596273;
   border-color:#dfe3ea;
   background:#fff;
 }
-#overdueAge[value="15"]{border-color:#e6942e;background:#fff8ed}
+#overdueAge[value="15"]{
+  border-color:#e6942e;
+  background:#fff8ed;
+}
 .due.overdue{font-weight:850}
+
+/* Keep the board usable while the action bar is open. */
+.kanban-wrap{
+  scroll-behavior:auto;
+  padding-bottom:22px;
+}
+.column-body{
+  overscroll-behavior:contain;
+}
+
 @media(max-width:850px){
+  .crm-main{padding-bottom:210px}
   .bulkbar{
-    top:64px;
-    width:calc(100% - 16px);
+    left:8px;
+    right:8px;
+    bottom:72px;
+    transform:none;
+    width:auto;
     max-width:none;
-    margin:4px 8px 10px;
     flex-wrap:wrap;
   }
   .bulkbar .bulkHint{display:none}
-  .bulkbar select{min-width:0;max-width:none;flex:1}
-  .bulkbar .btn{flex:1}
+  .bulkbar select{
+    min-width:0;
+    max-width:none;
+    flex:1 1 180px;
+  }
+  .bulkbar .btn{flex:1 1 auto}
 }

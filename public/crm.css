@@ -140,3 +140,8 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
   }
   .bulkbar .btn{flex:1 1 auto}
 }
+
+/* v1.5.17 — bulk owner reassignment */
+.bulkDivider{width:1px;height:28px;background:#e1e5eb;margin:0 2px}
+#bulkOwner{min-width:220px}
+@media(max-width:850px){.bulkDivider{display:none}#bulkOwner{min-width:0;flex:1 1 170px}}

@@ -72,6 +72,32 @@ router.post("/deals/bulk-stage",async(req,res)=>{
   }catch(e){return res.status(500).json({ok:false,error:e.message});}
 });
 
+
+router.post("/deals/bulk-owner",async(req,res)=>{
+  try{
+    const ids=Array.from(new Set((Array.isArray(req.body?.ids)?req.body.ids:[]).map(x=>String(x||"").trim()).filter(Boolean))).slice(0,450);
+    const owner=String(req.body?.owner||"").trim().toLowerCase();
+    if(!ids.length)return res.status(400).json({ok:false,error:"No hay tratos seleccionados"});
+    if(!owner)return res.status(400).json({ok:false,error:"Seleccioná un owner"});
+    if(!(await canSeeOwner(req.authUser,owner)))return res.status(403).json({ok:false,error:"No podés asignar ese owner"});
+    const refs=ids.map(id=>crmDb.collection("deals").doc(id));
+    const docs=await crmDb.getAll(...refs);
+    const allowed=[];
+    for(const d of docs){
+      if(d.exists && await canEditOwner(req.authUser,(d.data()||{}).owner))allowed.push(d.ref);
+    }
+    if(!allowed.length)return res.status(403).json({ok:false,error:"Sin permiso sobre los tratos seleccionados"});
+    const batch=crmDb.batch();
+    const now=new Date();
+    allowed.forEach(ref=>batch.update(ref,{owner,updatedAt:now}));
+    await batch.commit();
+    return res.json({ok:true,updated:allowed.length,readsEstimate:docs.length,writesEstimate:allowed.length});
+  }catch(e){
+    console.error("bulk owner",e);
+    return res.status(500).json({ok:false,error:e.message});
+  }
+});
+
 router.get("/deals",async(req,res)=>{
   try{
     const limit=cleanLimit(req.query.limit,50),

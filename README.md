@@ -263,3 +263,9 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Bulk actions now sit centered directly above the Kanban.
 - The bar remains sticky while scrolling but does not cover stage headers.
 - Preserves the v1.5.14 stage-scroll restoration when loading more cards.
+
+## v1.5.17 — Cambio masivo de owner
+- Bulk selection can now reassign selected deals to another owner.
+- Uses the existing owner permission model.
+- Supports up to 450 selected deals per operation.
+- Keeps bulk stage move and owner reassignment as separate actions.

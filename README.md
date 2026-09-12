@@ -269,3 +269,9 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Uses the existing owner permission model.
 - Supports up to 450 selected deals per operation.
 - Keeps bulk stage move and owner reassignment as separate actions.
+
+## v1.5.18 — Composer always visible
+- Restores the WhatsApp message composer at the bottom of the Inbox.
+- Conversation history uses the remaining height and scrolls independently.
+- Composer stays visible on desktop and mobile.
+- CRM behavior unchanged.

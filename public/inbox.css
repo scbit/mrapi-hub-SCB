@@ -166,3 +166,56 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
 .chat{min-height:0}
 .messages{min-height:0;overflow-y:auto}
 .composer{min-height:92px}
+
+/* v1.5.18 — composer always visible */
+.workspace{
+  min-height:0;
+  height:calc(100vh - 168px);
+  overflow:hidden;
+}
+.chat{
+  min-height:0;
+  height:100%;
+  overflow:hidden;
+  display:grid;
+  grid-template-rows:auto auto auto minmax(0,1fr) auto;
+}
+.chatHead{min-height:76px}
+.adContext{flex:none}
+.multiLineAlert{flex:none}
+.messages{
+  min-height:0;
+  height:auto;
+  overflow-y:auto;
+  overflow-x:hidden;
+}
+.composer{
+  position:relative;
+  z-index:10;
+  display:block;
+  background:#fff;
+  border-top:1px solid #e5e7eb;
+  padding:10px 14px 12px;
+  min-height:98px;
+  max-height:170px;
+  overflow:auto;
+}
+.modernComposer{
+  display:grid;
+  grid-template-columns:1fr auto;
+  align-items:end;
+  gap:8px;
+}
+.modernComposer textarea{
+  min-height:52px;
+  max-height:110px;
+}
+@media(max-width:850px){
+  .workspace{height:calc(100vh - 112px)}
+  .chat{grid-template-rows:auto auto auto minmax(0,1fr) auto}
+  .composer{
+    min-height:92px;
+    max-height:160px;
+    padding:8px 10px 10px;
+  }
+}

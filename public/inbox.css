@@ -167,22 +167,62 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
 .messages{min-height:0;overflow-y:auto}
 .composer{min-height:92px}
 
-/* v1.5.18 — composer always visible */
-.workspace{
+
+/* v1.5.19 — structural Inbox height fix
+   The shell really has 3 rows: topbar, KPI strip, workspace.
+   Workspace is bounded to the viewport; only messages scroll. */
+html,body,#app,.shell{
+  height:100%;
   min-height:0;
-  height:calc(100vh - 168px);
+}
+body{
   overflow:hidden;
 }
-.chat{
+.shell{
+  height:100dvh;
+  min-height:0;
+  display:grid;
+  grid-template-rows:64px auto minmax(0,1fr);
+  overflow:hidden;
+}
+.kpiStrip{
+  min-height:0;
+  flex:none;
+}
+.workspace{
+  height:auto;
+  min-height:0;
+  overflow:hidden;
+  align-self:stretch;
+}
+.sidebar,
+.chat,
+.crmPanel{
   min-height:0;
   height:100%;
   overflow:hidden;
+}
+.sidebar{
+  display:grid;
+  grid-template-rows:auto minmax(0,1fr) auto;
+}
+.list{
+  min-height:0;
+  overflow-y:auto;
+}
+.chat{
   display:grid;
   grid-template-rows:auto auto auto minmax(0,1fr) auto;
+  min-height:0;
+  height:100%;
+  overflow:hidden;
 }
-.chatHead{min-height:76px}
-.adContext{flex:none}
-.multiLineAlert{flex:none}
+.chatHead,
+.adContext,
+.multiLineAlert,
+.composer{
+  min-height:0;
+}
 .messages{
   min-height:0;
   height:auto;
@@ -192,30 +232,28 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
 .composer{
   position:relative;
   z-index:10;
-  display:block;
   background:#fff;
   border-top:1px solid #e5e7eb;
   padding:10px 14px 12px;
-  min-height:98px;
-  max-height:170px;
-  overflow:auto;
+  overflow:visible;
 }
-.modernComposer{
-  display:grid;
-  grid-template-columns:1fr auto;
-  align-items:end;
-  gap:8px;
+.crmPanel{
+  display:flex;
+  flex-direction:column;
 }
-.modernComposer textarea{
-  min-height:52px;
-  max-height:110px;
+.crmPanelBody{
+  min-height:0;
+  overflow-y:auto;
 }
 @media(max-width:850px){
-  .workspace{height:calc(100vh - 112px)}
-  .chat{grid-template-rows:auto auto auto minmax(0,1fr) auto}
-  .composer{
-    min-height:92px;
-    max-height:160px;
-    padding:8px 10px 10px;
+  .shell{
+    grid-template-rows:56px auto minmax(0,1fr);
+  }
+  .workspace{
+    min-height:0;
+  }
+  .shell.chatOpen .chat{
+    display:grid;
+    grid-template-rows:auto auto auto minmax(0,1fr) auto;
   }
 }

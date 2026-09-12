@@ -1,9 +1,9 @@
 FROM node:22-slim
 WORKDIR /app
-COPY package*.json ./
-RUN npm install --omit=dev
-COPY . .
 ENV NODE_ENV=production
-ENV PORT=8080
+COPY package*.json ./
+RUN npm install --omit=dev && npm cache clean --force
+COPY . .
+USER node
 EXPOSE 8080
-CMD ["npm","start"]
+CMD ["node", "server.js"]

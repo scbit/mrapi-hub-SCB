@@ -1,24 +1,17 @@
 {
-  "name": "mrapi-hub",
-  "version": "1.5.18",
+  "name": "mrapi-quote",
+  "version": "0.1.0",
   "private": true,
-  "description": "MR API HUB - CRM + HUB + Bandeja multi-tenant para Cloud Run",
-  "main": "server.js",
-  "engines": {
-    "node": ">=22"
-  },
+  "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "check": "node --check server.js && find src public -name '*.js' -print0 | xargs -0 -n1 node --check"
+    "start": "node server.js"
   },
   "dependencies": {
+    "@google-cloud/firestore": "^7.11.0",
     "@google-cloud/storage": "^7.16.0",
-    "cors": "^2.8.5",
-    "express": "^4.21.2",
-    "firebase-admin": "^13.0.2",
-    "helmet": "^8.1.0",
-    "axios": "^1.7.9",
-    "busboy": "^1.6.0",
-    "twilio": "^5.4.0"
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "pdfkit": "^0.17.1",
+    "xlsx": "^0.18.5"
   }
 }

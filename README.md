@@ -306,3 +306,9 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - A HUMAN seller sending text, file or approved template marks the conversation as read.
 - BOT/Dialogflow replies do not mark the conversation as read.
 - New inbound customer messages still set unreadCount / hasUnread.
+
+## v1.5.24 — Correct Vencidos +15 pagination
+- Fixed stage-level `Cargar más de esta etapa`: it now preserves owner, dealType and overdueDays filters.
+- Overdue pagination uses `dueDate` in the cursor instead of only createdAt.
+- Added a client-side safety guard so future or <15-day deals can never contaminate a `Vencidos +15 días` view.
+- Existing contaminated rows are removed from the current filtered view on the next render/load.

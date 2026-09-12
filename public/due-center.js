@@ -15,7 +15,7 @@ function shell(){
   document.body.innerHTML=`<div class="dueShell">
   <header class="dueTop"><a class="dueBrand" href="/"><img src="/assets/tenant-logo"><div><b>MR API HUB</b><small>${esc(window.MRAPI_TENANT?.shortName||'MRAPI')}</small></div></a>
     <nav><a href="/inbox">▣ Bandeja</a><a class="active" href="/crm">▦ CRM</a><a href="/">◇ HUB</a></nav>
-    <span class="spacer"></span><span class="version-pill">v1.5.26</span><span class="who">${esc(S.user?.name||S.user?.email||'')}</span>
+    <span class="spacer"></span><span class="version-pill">v1.5.27</span><span class="who">${esc(S.user?.name||S.user?.email||'')}</span>
   </header>
   <main class="dueMain">
     <div class="dueHead"><div><h1>Centro de Vencimientos</h1><p>Seguimiento comercial, selección masiva y plantillas aprobadas.</p></div><span class="spacer"></span><a class="btn secondary" href="/agenda">Agenda</a></div>
@@ -137,11 +137,13 @@ function renderCampaigns(){
       <button data-cmembers="${esc(c.id)}" data-status="ERROR" class="bad"><small>Errores</small><b>${Number(c.errors||0)}</b></button>
     </div>
     <div class="campaignActions">
+      <button class="miniBtn primaryManage" data-cmanage="${esc(c.id)}">Gestionar campaña</button>
       <button class="miniBtn" data-csend="${esc(c.id)}">Enviar próximos 30 pendientes</button>
       <button class="miniBtn" data-csub="${esc(c.id)}" ${campaignNoResponse(c)?'':'disabled'}>Crear subcampaña sin respuesta</button>
     </div>
   </article>`).join('');
-  document.querySelectorAll('[data-cmembers]').forEach(b=>b.onclick=()=>openCampaignMembers(b.dataset.cmembers,b.dataset.status||''));
+  document.querySelectorAll('[data-cmembers]').forEach(b=>b.onclick=()=>openCampaignManager(b.dataset.cmembers,b.dataset.status||''));
+  document.querySelectorAll('[data-cmanage]').forEach(b=>b.onclick=()=>openCampaignManager(b.dataset.cmanage,''));
   document.querySelectorAll('[data-csend]').forEach(b=>b.onclick=()=>sendCampaignBatch(b.dataset.csend));
   document.querySelectorAll('[data-csub]').forEach(b=>b.onclick=()=>createSubcampaign(b.dataset.csub));
 }
@@ -179,16 +181,104 @@ async function createSubcampaign(id){
     notice(`Subcampaña creada con ${d.total} contacto(s) sin respuesta.`,'ok');await loadCampaigns();
   }catch(e){notice(e.message,'error')}
 }
-async function openCampaignMembers(id,status){
+async function openCampaignManager(id,status=''){
+  const c=S.campaigns.find(x=>x.id===id);if(!c)return;
   $('modalBack').classList.add('open');
-  const c=S.campaigns.find(x=>x.id===id);$('modalTitle').textContent=(c?.name||'Campaña')+(status?` · ${status==='SIN_RESPUESTA'?'Sin respuesta':status}`:'');
-  $('modalBody').innerHTML='<div class="loading">Cargando miembros...</div>';
+  $('modalTitle').textContent='Gestionar campaña';
+  const templateOpts=S.templates.map(t=>`<option value="${esc(t.sid)}" ${t.sid===c.templateSid?'selected':''}>${esc(t.name)}${t.language?' · '+esc(t.language):''}</option>`).join('');
+  $('modalBody').innerHTML=`<div class="campaignManager">
+    <section class="campaignEditCard">
+      <div class="campaignEditGrid">
+        <label>Nombre campaña<input id="cmName" value="${esc(c.name||'')}"></label>
+        <label>Plantilla<select id="cmTemplate"><option value="">Seleccionar...</option>${templateOpts}</select></label>
+        <label>Próximo vencimiento<input id="cmDue" type="date" value="${esc(c.nextDueDate||'')}"></label>
+        <button class="btn" id="cmSave">Guardar cambios</button>
+      </div>
+      <div class="campaignDangerRow">
+        <div><b>${Number(c.total||0)} contactos</b><span> · ${Number(c.responded||0)} respondieron · ${campaignNoResponse(c)} sin respuesta</span></div>
+        <button class="btn danger small" id="cmDelete">Eliminar campaña</button>
+      </div>
+    </section>
+
+    <section class="campaignAddCard">
+      <div><b>Agregar contactos</b><p>Podés sumar los tratos que tengas seleccionados en el listado de vencimientos.</p></div>
+      <button class="btn secondary small" id="cmAddSelected">Agregar seleccionados (${S.selected.size})</button>
+    </section>
+
+    <div class="campaignMemberTabs">
+      <button data-cmstatus="" class="${!status?'active':''}">Todos</button>
+      <button data-cmstatus="RESPONDED" class="${status==='RESPONDED'?'active':''}">Respondieron</button>
+      <button data-cmstatus="SIN_RESPUESTA" class="${status==='SIN_RESPUESTA'?'active':''}">Sin respuesta</button>
+      <button data-cmstatus="PENDING" class="${status==='PENDING'?'active':''}">Pendientes</button>
+      <button data-cmstatus="ERROR" class="${status==='ERROR'?'active':''}">Errores</button>
+    </div>
+    <div id="cmMembers"><div class="loading">Cargando contactos...</div></div>
+  </div>`;
+
+  $('cmSave').onclick=()=>saveCampaign(id);
+  $('cmDelete').onclick=()=>deleteCampaign(id);
+  $('cmAddSelected').onclick=()=>addSelectedToCampaign(id);
+  document.querySelectorAll('[data-cmstatus]').forEach(b=>b.onclick=()=>{
+    document.querySelectorAll('[data-cmstatus]').forEach(x=>x.classList.toggle('active',x===b));
+    loadCampaignMembersIntoManager(id,b.dataset.cmstatus||'');
+  });
+  await loadCampaignMembersIntoManager(id,status);
+}
+async function loadCampaignMembersIntoManager(id,status=''){
+  const box=$('cmMembers');if(!box)return;box.innerHTML='<div class="loading">Cargando contactos...</div>';
   try{
     const p=new URLSearchParams();if(status)p.set('status',status);
     const d=await api('/api/due-center/campaigns/'+encodeURIComponent(id)+'/members?'+p);
-    $('modalBody').innerHTML=(d.items||[]).map(x=>`<div class="memberRow"><div><b>${esc(x.contactName||x.dealId)}</b><span>${esc(x.phone||'')} · ${esc(x.owner||'')}</span></div><span class="memberStatus ${String(x.status||'').toLowerCase()}">${esc(x.status||'')}</span><a class="miniBtn" href="/crm?dealId=${encodeURIComponent(x.dealId)}">Abrir trato</a></div>`).join('')||'<div class="empty">Sin contactos en este estado.</div>';
-  }catch(e){$('modalBody').innerHTML=`<div class="dueNotice error">${esc(e.message)}</div>`}
+    box.innerHTML=(d.items||[]).map(x=>`<div class="memberRow managed">
+      <div><b>${esc(x.contactName||x.dealId)}</b><span>${esc(x.phone||'Sin teléfono')} · ${esc(x.owner||'Sin owner')} · ${esc(x.stage||'')}</span></div>
+      <span class="memberStatus ${String(x.status||'').toLowerCase()}">${esc(x.status||'')}</span>
+      <div class="memberActions">
+        <a class="miniBtn" href="/crm?dealId=${encodeURIComponent(x.dealId)}">Abrir trato</a>
+        <button class="miniBtn remove" data-remove-member="${esc(x.dealId)}">Quitar</button>
+      </div>
+    </div>`).join('')||'<div class="empty">Sin contactos en este estado.</div>';
+    box.querySelectorAll('[data-remove-member]').forEach(b=>b.onclick=()=>removeCampaignMember(id,b.dataset.removeMember,status));
+  }catch(e){box.innerHTML=`<div class="dueNotice error">${esc(e.message)}</div>`}
 }
+async function saveCampaign(id){
+  const c=S.campaigns.find(x=>x.id===id);if(!c)return;
+  const contentSid=$('cmTemplate').value,name=$('cmName').value.trim(),nextDueDate=$('cmDue').value;
+  const templateName=$('cmTemplate').selectedOptions?.[0]?.textContent||c.templateName||'';
+  if(!name)return alert('Poné un nombre a la campaña');
+  $('cmSave').disabled=true;
+  try{
+    await api('/api/due-center/campaigns/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,contentSid,templateName,nextDueDate})});
+    notice('Campaña actualizada.','ok');await loadCampaigns();
+    const fresh=S.campaigns.find(x=>x.id===id);if(fresh){c.name=fresh.name;c.templateSid=fresh.templateSid;c.templateName=fresh.templateName;c.nextDueDate=fresh.nextDueDate}
+  }catch(e){alert(e.message)}finally{if($('cmSave'))$('cmSave').disabled=false}
+}
+async function deleteCampaign(id){
+  const c=S.campaigns.find(x=>x.id===id);if(!c)return;
+  if(!confirm(`Eliminar la campaña "${c.name}" y sus miembros?\n\nEsto NO elimina los tratos del CRM.`))return;
+  try{
+    await api('/api/due-center/campaigns/'+encodeURIComponent(id),{method:'DELETE'});
+    closeModal();notice('Campaña eliminada. Los tratos del CRM siguen intactos.','ok');await loadCampaigns();
+  }catch(e){alert(e.message)}
+}
+async function addSelectedToCampaign(id){
+  const ids=[...S.selected];
+  if(!ids.length)return alert('Primero seleccioná uno o más tratos del listado de vencimientos.');
+  if(!confirm(`Agregar ${ids.length} contacto(s) seleccionados a esta campaña?`))return;
+  const btn=$('cmAddSelected');if(btn)btn.disabled=true;
+  try{
+    const d=await api('/api/due-center/campaigns/'+encodeURIComponent(id)+'/members',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dealIds:ids})});
+    notice(`Se agregaron ${d.added} contacto(s) a la campaña.`,'ok');await loadCampaigns();await loadCampaignMembersIntoManager(id,'');
+    if(btn)btn.textContent=`Agregar seleccionados (${S.selected.size})`;
+  }catch(e){alert(e.message)}finally{if(btn)btn.disabled=false}
+}
+async function removeCampaignMember(id,dealId,status=''){
+  if(!confirm('Quitar este contacto de la campaña?\n\nEl trato NO se elimina del CRM.'))return;
+  try{
+    await api('/api/due-center/campaigns/'+encodeURIComponent(id)+'/members/'+encodeURIComponent(dealId),{method:'DELETE'});
+    await loadCampaigns();await loadCampaignMembersIntoManager(id,status);
+  }catch(e){alert(e.message)}
+}
+
 async function sendSelected(){
   const ids=[...S.selected],sid=$('template').value,nextDue=$('nextDue').value,campaign=$('campaign').value.trim();
   if(!ids.length)return notice('Seleccioná al menos un trato.','error');if(!sid)return notice('Seleccioná una plantilla aprobada.','error');

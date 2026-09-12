@@ -326,6 +326,106 @@ router.post("/campaigns/:id/send",async(req,res)=>{
   }catch(e){console.error("campaign send",e);return res.status(500).json({ok:false,error:e.message})}
 });
 
+
+router.patch("/campaigns/:id",async(req,res)=>{
+  try{
+    const ref=crmDb.collection(CAMPAIGNS).doc(clean(req.params.id,180));
+    const snap=await ref.get();if(!snap.exists)return res.status(404).json({ok:false,error:"Campaña no encontrada"});
+    const old=snap.data()||{};
+    const name=clean(req.body?.name,180)||old.name||"Campaña";
+    const nextDueDate=normalizeDate(req.body?.nextDueDate||old.nextDueDate,7);
+    const contentSid=clean(req.body?.contentSid,120)||old.templateSid||"";
+    let templateName=clean(req.body?.templateName,180)||old.templateName||contentSid;
+    if(contentSid && contentSid!==old.templateSid){
+      try{const ts=await wa.listApprovedTemplates();const t=ts.find(x=>x.sid===contentSid);if(t)templateName=t.name||contentSid}catch{}
+    }
+    await ref.set({name,nextDueDate,templateSid:contentSid,templateName,updatedAt:FieldValue.serverTimestamp()},{merge:true});
+    const pending=await ref.collection("members").where("status","==","PENDING").limit(250).get();
+    if(!pending.empty){
+      const batch=crmDb.batch();
+      pending.docs.forEach(d=>batch.set(d.ref,{templateSid:contentSid,templateName,nextDueDate,updatedAt:FieldValue.serverTimestamp()},{merge:true}));
+      await batch.commit();
+    }
+    return res.json({ok:true,id:ref.id,name,nextDueDate,templateSid:contentSid,templateName,writesEstimate:1+pending.size});
+  }catch(e){console.error("campaign update",e);return res.status(500).json({ok:false,error:e.message})}
+});
+
+router.post("/campaigns/:id/members",async(req,res)=>{
+  try{
+    const ref=crmDb.collection(CAMPAIGNS).doc(clean(req.params.id,180));
+    const cs=await ref.get();if(!cs.exists)return res.status(404).json({ok:false,error:"Campaña no encontrada"});
+    const c=cs.data()||{};
+    const incoming=[...new Set((Array.isArray(req.body?.dealIds)?req.body.dealIds:[]).map(x=>clean(x,180)).filter(Boolean))].slice(0,200);
+    if(!incoming.length)return res.status(400).json({ok:false,error:"Seleccioná al menos un trato"});
+    const current=await ref.collection("members").limit(250).get();
+    const existing=new Set(current.docs.map(d=>d.id));
+    const room=Math.max(0,200-existing.size);
+    const ids=incoming.filter(id=>!existing.has(id)).slice(0,room);
+    if(!ids.length)return res.status(400).json({ok:false,error:room<=0?"La campaña ya alcanzó 200 contactos":"Los seleccionados ya están en la campaña"});
+    const docs=await crmDb.getAll(...ids.map(id=>crmDb.collection("deals").doc(id)));
+    const batch=crmDb.batch();let added=0,excluded=0,pending=0;const owners=new Set(Array.isArray(c.ownerScope)?c.ownerScope:[]);
+    for(const d of docs){
+      if(!d.exists)continue;const x=d.data()||{};
+      if(!(await canSeeOwner(req.authUser,x.owner)))continue;
+      let contact={};if(x.contactId){const cx=await crmDb.collection("contacts").doc(String(x.contactId)).get();if(cx.exists)contact=cx.data()||{}}
+      const phone=waPhone(contact.phone||x.contactPhone||"");
+      const status=phone?"PENDING":"EXCLUDED";
+      if(status==="PENDING")pending++;else excluded++;
+      owners.add(String(x.owner||"").toLowerCase());
+      batch.set(ref.collection("members").doc(d.id),{
+        dealId:d.id,contactId:String(x.contactId||""),contactName:String(x.contactName||contact.name||x.title||""),
+        owner:String(x.owner||"").toLowerCase(),stage:String(x.stage||""),phone:digits(phone),status,
+        templateSid:c.templateSid||"",templateName:c.templateName||"",nextDueDate:c.nextDueDate||"",
+        createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()
+      });
+      added++;
+    }
+    batch.set(ref,{
+      total:FieldValue.increment(added),pending:FieldValue.increment(pending),excluded:FieldValue.increment(excluded),
+      ownerScope:[...owners].filter(Boolean),updatedAt:FieldValue.serverTimestamp()
+    },{merge:true});
+    await batch.commit();
+    return res.json({ok:true,added,pending,excluded,totalBefore:existing.size,writesEstimate:added+1});
+  }catch(e){console.error("campaign add members",e);return res.status(500).json({ok:false,error:e.message})}
+});
+
+router.delete("/campaigns/:id/members/:dealId",async(req,res)=>{
+  try{
+    const campaignId=clean(req.params.id,180),dealId=clean(req.params.dealId,180);
+    const cref=crmDb.collection(CAMPAIGNS).doc(campaignId),mref=cref.collection("members").doc(dealId);
+    const [cs,ms]=await Promise.all([cref.get(),mref.get()]);
+    if(!cs.exists)return res.status(404).json({ok:false,error:"Campaña no encontrada"});
+    if(!ms.exists)return res.status(404).json({ok:false,error:"Contacto no está en la campaña"});
+    const m=ms.data()||{},status=String(m.status||"").toUpperCase();
+    const patch={total:FieldValue.increment(-1),updatedAt:FieldValue.serverTimestamp()};
+    if(status==="PENDING")patch.pending=FieldValue.increment(-1);
+    if(["SENT","NO_RESPONSE","RESPONDED"].includes(status))patch.sent=FieldValue.increment(-1);
+    if(status==="RESPONDED")patch.responded=FieldValue.increment(-1);
+    if(status==="ERROR")patch.errors=FieldValue.increment(-1);
+    if(status==="EXCLUDED")patch.excluded=FieldValue.increment(-1);
+    const batch=crmDb.batch();batch.delete(mref);batch.set(cref,patch,{merge:true});await batch.commit();
+    if(m.phone){
+      const w=crmDb.collection(PHONE_WATCH).doc(digits(m.phone));
+      await w.set({entries:FieldValue.arrayRemove({campaignId,dealId}),updatedAt:FieldValue.serverTimestamp()},{merge:true}).catch(()=>{});
+    }
+    return res.json({ok:true});
+  }catch(e){console.error("campaign remove member",e);return res.status(500).json({ok:false,error:e.message})}
+});
+
+router.delete("/campaigns/:id",async(req,res)=>{
+  try{
+    const id=clean(req.params.id,180),ref=crmDb.collection(CAMPAIGNS).doc(id),snap=await ref.get();
+    if(!snap.exists)return res.status(404).json({ok:false,error:"Campaña no encontrada"});
+    const members=await ref.collection("members").limit(250).get();
+    const batch=crmDb.batch();members.docs.forEach(d=>batch.delete(d.ref));batch.delete(ref);await batch.commit();
+    for(const d of members.docs){
+      const m=d.data()||{};if(!m.phone)continue;
+      await crmDb.collection(PHONE_WATCH).doc(digits(m.phone)).set({entries:FieldValue.arrayRemove({campaignId:id,dealId:d.id}),updatedAt:FieldValue.serverTimestamp()},{merge:true}).catch(()=>{});
+    }
+    return res.json({ok:true,deletedMembers:members.size});
+  }catch(e){console.error("campaign delete",e);return res.status(500).json({ok:false,error:e.message})}
+});
+
 router.post("/campaigns/:id/subcampaign",async(req,res)=>{
   try{
     const parent=crmDb.collection(CAMPAIGNS).doc(req.params.id);const ps=await parent.get();if(!ps.exists)return res.status(404).json({ok:false,error:"Campaña no encontrada"});

@@ -335,3 +335,13 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Campaigns can contain up to 200 members; sending is intentionally processed in batches of up to 30 for operational safety.
 - Automatic campaign/direct sends now add a visible CRM note plus technical log.
 - CRM deal note includes campaign, template, timestamp and next due date.
+
+## v1.5.27 — Campaign Manager
+- Added `Gestionar campaña` on each campaign card.
+- Campaign detail shows all member contacts and filters by status.
+- Edit campaign name, approved template and next due date.
+- Add currently selected CRM deals into an existing campaign.
+- Remove individual members without deleting the CRM deal.
+- Delete an entire campaign without deleting CRM deals.
+- Campaign counters are adjusted when members are removed.
+- Pending members inherit campaign edits to template/next due date.

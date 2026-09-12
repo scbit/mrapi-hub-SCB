@@ -30,3 +30,18 @@
 .campaignActions{display:flex;gap:8px;margin-top:11px;justify-content:flex-end}.campaignActions button:disabled{opacity:.4;cursor:not-allowed}
 .memberRow{display:grid;grid-template-columns:minmax(0,1fr) 110px auto;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid #eef1f3}.memberRow>div{display:grid;gap:3px}.memberRow span{font-size:11px;color:#7a8597}.memberStatus{justify-self:start;padding:4px 7px;border-radius:999px;background:#f0f2f5;font-size:9px!important;font-weight:850}.memberStatus.responded{background:#ecfdf3;color:#067647}.memberStatus.sent,.memberStatus.no_response{background:#fffaeb;color:#b54708}.memberStatus.error{background:#fff1f0;color:#b42318}
 @media(max-width:900px){.campaignMetrics{grid-template-columns:repeat(2,1fr)}.campaignActions{flex-wrap:wrap;justify-content:flex-start}.sendActions{grid-column:1/-1}.memberRow{grid-template-columns:1fr}.campaignSectionHead{align-items:flex-start;flex-direction:column}}
+
+/* v1.5.27 — functional campaign manager */
+.primaryManage{background:#111827!important;color:#fff!important;border-color:#111827!important}
+.btn.danger{background:#b42318;color:#fff}
+.dueModal{width:min(1000px,96vw)}
+.campaignManager{display:grid;gap:12px}
+.campaignEditCard,.campaignAddCard{border:1px solid #e7ebef;border-radius:14px;padding:12px;background:#fafbfc}
+.campaignEditGrid{display:grid;grid-template-columns:1.2fr 1.3fr 180px auto;gap:9px;align-items:end}
+.campaignEditGrid label{display:grid;gap:5px;font-size:10px;font-weight:850;color:#667085;text-transform:uppercase}
+.campaignEditGrid input,.campaignEditGrid select{width:100%;border:1px solid #dfe3ea;border-radius:10px;padding:10px 11px;background:#fff;font:inherit}
+.campaignDangerRow{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px;padding-top:10px;border-top:1px solid #e7ebef}.campaignDangerRow span{font-size:11px;color:#7a8597}
+.campaignAddCard{display:flex;align-items:center;justify-content:space-between;gap:12px}.campaignAddCard p{margin:3px 0 0;color:#7a8597;font-size:11px}
+.campaignMemberTabs{display:flex;gap:6px;flex-wrap:wrap}.campaignMemberTabs button{border:1px solid #dfe3ea;background:#fff;border-radius:999px;padding:7px 10px;font-size:11px;font-weight:850;color:#5d6676;cursor:pointer}.campaignMemberTabs button.active{background:#111827;color:#fff;border-color:#111827}
+.memberRow.managed{grid-template-columns:minmax(0,1fr) 120px 210px}.memberActions{display:flex;gap:6px;justify-content:flex-end}.miniBtn.remove{color:#b42318;border-color:#f1c7c2}
+@media(max-width:900px){.campaignEditGrid{grid-template-columns:1fr 1fr}.campaignAddCard,.campaignDangerRow{align-items:flex-start;flex-direction:column}.memberRow.managed{grid-template-columns:1fr}.memberActions{justify-content:flex-start}}

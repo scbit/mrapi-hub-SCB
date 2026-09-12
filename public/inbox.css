@@ -257,3 +257,62 @@ body{
     grid-template-rows:auto auto auto minmax(0,1fr) auto;
   }
 }
+
+
+/* v1.5.21 — definitive chat sizing */
+.chat{
+  display:grid;
+  grid-template-rows:auto auto auto minmax(0,1fr) auto;
+  min-height:0;
+  height:100%;
+  overflow:hidden;
+}
+
+.chatHead,
+.adContext,
+.multiLineAlert,
+.composer{
+  min-height:0;
+  flex:none;
+}
+
+.messages{
+  min-height:0 !important;
+  height:auto !important;
+  max-height:none !important;
+  align-self:stretch;
+  overflow-y:auto !important;
+  overflow-x:hidden;
+  box-sizing:border-box;
+}
+
+.composer{
+  position:relative;
+  inset:auto;
+  z-index:10;
+  align-self:stretch;
+  width:100%;
+  box-sizing:border-box;
+  background:#fff;
+  border-top:1px solid #e5e7eb;
+}
+
+/* The chat column itself never scrolls; only the message history does. */
+.workspace,
+.chat{
+  overscroll-behavior:none;
+}
+
+@media(max-width:850px){
+  .shell.chatOpen .chat{
+    display:grid;
+    grid-template-rows:auto auto auto minmax(0,1fr) auto;
+    min-height:0;
+    height:100%;
+    overflow:hidden;
+  }
+  .messages{
+    min-height:0 !important;
+    height:auto !important;
+  }
+}

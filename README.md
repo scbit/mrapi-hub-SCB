@@ -282,3 +282,14 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Long conversations scroll only inside the message history.
 - Composer remains visible at the bottom regardless of chat length.
 - Sidebar and CRM panel scroll independently inside the same viewport.
+
+## v1.5.20 — Composer bottom on short chats
+- Short conversations now stretch the message area to fill the available space.
+- Composer stays anchored at the bottom just like in long conversations.
+- Long-chat behavior remains unchanged: only message history scrolls.
+
+## v1.5.21 — Definitive composer sizing
+- Removes `height:100%` from the message history, which could invade the composer row on long chats.
+- The central chat is now strictly: header / ad / multi-line alert / flexible messages / composer.
+- Only the message history scrolls.
+- Composer remains visible at the same bottom position for both short and long conversations.

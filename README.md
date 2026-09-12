@@ -293,3 +293,8 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - The central chat is now strictly: header / ad / multi-line alert / flexible messages / composer.
 - Only the message history scrolls.
 - Composer remains visible at the same bottom position for both short and long conversations.
+
+## v1.5.22 — Fix composer when optional alerts are hidden
+- Root cause fixed: hidden multi-line/ad blocks no longer shift the CSS Grid rows.
+- Explicit rows: header=1, ad=2, multi-line alert=3, messages=4, composer=5.
+- Composer remains at the bottom whether the customer has 1 line, 2 lines, advertising context, or none.

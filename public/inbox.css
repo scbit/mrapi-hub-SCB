@@ -316,3 +316,52 @@ body{
     height:auto !important;
   }
 }
+
+/* v1.5.22 — explicit chat grid rows
+   Optional ad/multi-line blocks can hide without shifting messages/composer. */
+.chat{
+  display:grid;
+  grid-template-rows:auto auto auto minmax(0,1fr) auto;
+  min-height:0;
+  height:100%;
+  overflow:hidden;
+  position:relative;
+}
+.chat > .chatHead{grid-row:1}
+.chat > .adContext{grid-row:2}
+.chat > .multiLineAlert{grid-row:3}
+.chat > .messages{
+  grid-row:4;
+  min-height:0 !important;
+  height:auto !important;
+  overflow-y:auto !important;
+  overflow-x:hidden;
+}
+.chat > .composer{
+  grid-row:5;
+  min-height:0;
+  height:auto;
+  align-self:stretch;
+  position:relative;
+  z-index:10;
+}
+.chat > .newMsgBadge{
+  position:absolute;
+  z-index:12;
+}
+
+/* Hidden optional rows collapse to zero but do not alter row assignment. */
+.chat > .adContext[style*="display:none"],
+.chat > .multiLineAlert[style*="display:none"]{
+  min-height:0;
+}
+
+@media(max-width:850px){
+  .shell.chatOpen .chat{
+    display:grid;
+    grid-template-rows:auto auto auto minmax(0,1fr) auto;
+    min-height:0;
+    height:100%;
+    overflow:hidden;
+  }
+}

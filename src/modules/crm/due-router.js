@@ -50,6 +50,7 @@ function modeBounds(mode){
   const today=isoDateBA();
   if(mode==="hoy")return {from:today,to:today};
   if(mode==="proximos_7")return {from:today,to:plusDaysISO(today,7)};
+  if(mode==="vencidos_15")return {to:plusDaysISO(today,-15)};
   return {to:today};
 }
 function publicDeal(doc,contact){
@@ -114,7 +115,7 @@ router.get("/templates",async(req,res)=>{
 
 router.get("/deals",async(req,res)=>{
   try{
-    const mode=["vencidos","hoy","proximos_7"].includes(clean(req.query.mode,30))?clean(req.query.mode,30):"vencidos";
+    const mode=["vencidos","vencidos_15","hoy","proximos_7"].includes(clean(req.query.mode,30))?clean(req.query.mode,30):"vencidos";
     const stage=clean(req.query.stage,120),owner=clean(req.query.owner,220).toLowerCase(),dealType=clean(req.query.dealType,80),q=clean(req.query.q,160).toLowerCase();
     const sendState=clean(req.query.sendState,30).toLowerCase();
     const limit=Math.max(1,Math.min(200,Number(req.query.limit||100)||100));
@@ -247,35 +248,123 @@ router.post("/campaigns",async(req,res)=>{
     const name=clean(req.body?.name,180)||`Recontacto ${isoDateBA()}`;
     const contentSid=clean(req.body?.contentSid,120);
     const nextDueDate=normalizeDate(req.body?.nextDueDate,7);
+    const createNewDeal=Boolean(req.body?.createNewDeal);
+    const newDealStage=PIPELINE_STAGES.includes(clean(req.body?.newDealStage,120))?clean(req.body?.newDealStage,120):"RECOVERY +15 DIAS";
+    const targetOwner=clean(req.body?.targetOwner,220).toLowerCase();
     if(!ids.length)return res.status(400).json({ok:false,error:"Seleccioná al menos un trato"});
     if(!contentSid)return res.status(400).json({ok:false,error:"Seleccioná una plantilla"});
-    let templateName=contentSid;try{const ts=await wa.listApprovedTemplates();const t=ts.find(x=>x.sid===contentSid);if(t)templateName=t.name||contentSid}catch{}
+    if(targetOwner && !(await canSeeOwner(req.authUser,targetOwner)))return res.status(403).json({ok:false,error:"No podés asignar ese owner"});
+
+    let templateName=contentSid;
+    try{const ts=await wa.listApprovedTemplates();const t=ts.find(x=>x.sid===contentSid);if(t)templateName=t.name||contentSid}catch{}
+
     const ref=crmDb.collection(CAMPAIGNS).doc();
     const docs=await crmDb.getAll(...ids.map(id=>crmDb.collection("deals").doc(id)));
-    const batch=crmDb.batch();let added=0,blocked=0;const owners=new Set();
-    for(const d of docs){
-      if(!d.exists)continue;const x=d.data()||{};
+    const batch=crmDb.batch();
+    const owners=new Set();
+    const conversationRelinks=[];
+    let added=0,blocked=0,migrated=0,reassigned=0;
+
+    for(const sourceDoc of docs){
+      if(!sourceDoc.exists)continue;
+      const x=sourceDoc.data()||{};
       if(!(await canSeeOwner(req.authUser,x.owner)))continue;
-      let contact={};if(x.contactId){const c=await crmDb.collection("contacts").doc(String(x.contactId)).get();if(c.exists)contact=c.data()||{}}
+
+      let contact={};
+      if(x.contactId){
+        const c=await crmDb.collection("contacts").doc(String(x.contactId)).get();
+        if(c.exists)contact=c.data()||{};
+      }
+
       const phone=waPhone(contact.phone||x.contactPhone||"");
-      const status=phone?"PENDING":"EXCLUDED";if(!phone)blocked++;
-      owners.add(String(x.owner||"").toLowerCase());
-      batch.set(ref.collection("members").doc(d.id),{
-        dealId:d.id,contactId:String(x.contactId||""),contactName:String(x.contactName||contact.name||x.title||""),
-        owner:String(x.owner||"").toLowerCase(),stage:String(x.stage||""),phone:digits(phone),status,
-        templateSid:contentSid,templateName,nextDueDate,createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()
+      const status=phone?"PENDING":"EXCLUDED";
+      if(!phone)blocked++;
+
+      const effectiveOwner=targetOwner||String(x.owner||"").toLowerCase();
+      owners.add(effectiveOwner);
+
+      let activeDealRef=sourceDoc.ref;
+      let activeDealId=sourceDoc.id;
+
+      if(createNewDeal){
+        activeDealRef=crmDb.collection("deals").doc();
+        activeDealId=activeDealRef.id;
+        const createdAt=new Date();
+        const migrationNote=`RECONTACTO · Campaña: ${name}\nTrato original: ${sourceDoc.id}`;
+        const newDeal={
+          title:String(x.title||x.contactName||contact.name||"Recontacto"),
+          contactId:String(x.contactId||""),
+          contactName:String(x.contactName||contact.name||""),
+          company:String(x.company||contact.company||""),
+          value:Number(x.value||0)||0,
+          dueDate:nextDueDate,
+          stage:newDealStage,
+          dealType:DEAL_TYPES.includes(x.dealType)?x.dealType:"LCL_PROPIO",
+          owner:effectiveOwner,
+          notes:migrationNote,
+          files:[],
+          sourceCampaignId:ref.id,
+          sourceDealId:sourceDoc.id,
+          recontactMigrated:true,
+          createdAt,
+          updatedAt:createdAt
+        };
+        if(x.leadQuality)newDeal.leadQuality=x.leadQuality;
+        batch.set(activeDealRef,newDeal);
+        migrated++;
+        conversationRelinks.push({sourceDealId:sourceDoc.id,newDealId:activeDealId,contactId:String(x.contactId||""),phone});
+      }else if(targetOwner && targetOwner!==String(x.owner||"").toLowerCase()){
+        batch.set(sourceDoc.ref,{owner:targetOwner,updatedAt:new Date()},{merge:true});
+        reassigned++;
+      }
+
+      batch.set(ref.collection("members").doc(activeDealId),{
+        dealId:activeDealId,
+        originalDealId:sourceDoc.id,
+        migratedDeal:createNewDeal,
+        contactId:String(x.contactId||""),
+        contactName:String(x.contactName||contact.name||x.title||""),
+        owner:effectiveOwner,
+        stage:createNewDeal?newDealStage:String(x.stage||""),
+        phone:digits(phone),
+        status,
+        templateSid:contentSid,templateName,nextDueDate,
+        createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()
       });
       added++;
     }
+
     batch.set(ref,{
       name,type:"recontact",status:"ACTIVE",templateSid:contentSid,templateName,nextDueDate,
       total:added,pending:Math.max(0,added-blocked),sent:0,responded:0,errors:0,excluded:blocked,
+      createNewDeal,newDealStage:createNewDeal?newDealStage:"",targetOwner:targetOwner||"",
+      migratedDeals:migrated,reassignedDeals:reassigned,
       parentCampaignId:clean(req.body?.parentCampaignId,180),generation:Number(req.body?.generation||0)||0,
       ownerScope:[...owners].filter(Boolean),createdBy:req.authUser.email||req.authUser.id||"",
       createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()
     });
     await batch.commit();
-    return res.json({ok:true,id:ref.id,total:added,excluded:blocked,writesEstimate:added+1});
+
+    // Relink the most relevant HUB conversation to the newly-created deal.
+    // This keeps the CRM summary/chat following the active recontact opportunity.
+    if(createNewDeal){
+      for(const link of conversationRelinks.slice(0,200)){
+        try{
+          let snap=await inboxDb.collection("conversations").where("dealId","==",link.sourceDealId).limit(10).get();
+          if(snap.empty && link.phone)snap=await inboxDb.collection("conversations").where("waFrom","==",wa.ensureWhatsappPrefix(link.phone)).limit(10).get();
+          if(!snap.empty){
+            const ib=inboxDb.batch();
+            snap.docs.forEach(d=>ib.set(d.ref,{dealId:link.newDealId,contactId:link.contactId,updatedAt:FieldValue.serverTimestamp()},{merge:true}));
+            await ib.commit();
+          }
+        }catch(err){console.warn("campaign conversation relink",link.sourceDealId,err.message)}
+      }
+    }
+
+    return res.json({
+      ok:true,id:ref.id,total:added,excluded:blocked,migrated,reassigned,
+      createNewDeal,newDealStage,targetOwner,writesEstimate:added+1+migrated+reassigned
+    });
   }catch(e){console.error("campaign create",e);return res.status(500).json({ok:false,error:e.message})}
 });
 

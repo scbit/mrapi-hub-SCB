@@ -15,13 +15,13 @@ function shell(){
   document.body.innerHTML=`<div class="dueShell">
   <header class="dueTop"><a class="dueBrand" href="/"><img src="/assets/tenant-logo"><div><b>MR API HUB</b><small>${esc(window.MRAPI_TENANT?.shortName||'MRAPI')}</small></div></a>
     <nav><a href="/inbox">▣ Bandeja</a><a class="active" href="/crm">▦ CRM</a><a href="/">◇ HUB</a></nav>
-    <span class="spacer"></span><span class="version-pill">v1.5.27</span><span class="who">${esc(S.user?.name||S.user?.email||'')}</span>
+    <span class="spacer"></span><span class="version-pill">v1.5.28</span><span class="who">${esc(S.user?.name||S.user?.email||'')}</span>
   </header>
   <main class="dueMain">
-    <div class="dueHead"><div><h1>Centro de Vencimientos</h1><p>Seguimiento comercial, selección masiva y plantillas aprobadas.</p></div><span class="spacer"></span><a class="btn secondary" href="/agenda">Agenda</a></div>
-    <div class="dueModules"><a href="/crm">Pipeline</a><a href="/contacts">Contactos</a><a href="/agenda">Agenda</a><a class="active" href="/vencimientos">Vencimientos</a></div>
+    <div class="dueHead"><div><h1>Centro de Recontacto</h1><p>Campañas de recontacto, vencidos y seguimiento comercial.</p></div><span class="spacer"></span><a class="btn secondary" href="/agenda">Agenda</a></div>
+    <div class="dueModules"><a href="/crm">Pipeline</a><a href="/contacts">Contactos</a><a href="/agenda">Agenda</a><a class="active" href="/vencimientos">Recontacto</a></div>
     <section class="dueCard">
-      <div class="dueTabs" id="tabs">${[['vencidos','Vencidos'],['hoy','Hoy'],['proximos_7','Próximos 7 días']].map(x=>`<button class="${S.mode===x[0]?'active':''}" data-mode="${x[0]}">${x[1]}</button>`).join('')}</div>
+      <div class="dueTabs" id="tabs">${[['vencidos','Vencidos'],['vencidos_15','Vencidos +15 días'],['hoy','Hoy'],['proximos_7','Próximos 7 días']].map(x=>`<button class="${S.mode===x[0]?'active':''}" data-mode="${x[0]}">${x[1]}</button>`).join('')}</div>
       <div class="dueFilters">
         <select id="stage"><option value="">Todas las etapas</option></select>
         <select id="owner"><option value="">Todos mis vendedores</option></select>
@@ -43,6 +43,11 @@ function shell(){
         <label>Próximo vencimiento<input type="date" id="nextDue"></label>
         <label>Nombre campaña<input id="campaign" placeholder="Ej. Seguimiento vencidos septiembre"></label>
         <div class="sendActions"><button class="btn secondary sendBtn" id="createCampaignBtn">Crear campaña</button><button class="btn sendBtn" id="sendBtn">Enviar directo</button></div>
+      </div>
+      <div class="campaignCreateOptions">
+        <label class="checkOpt"><input type="checkbox" id="createNewDeal"> <span><b>Crear un trato nuevo para cada contacto</b><small>El trato anterior queda como histórico y el chat se vincula al nuevo trato.</small></span></label>
+        <label>Etapa del nuevo trato<select id="newDealStage"></select></label>
+        <label>Owner de los tratos<select id="targetOwner"><option value="">Conservar owner actual</option></select></label>
       </div>
       <div class="sendHint" id="templateHint">Las plantillas se cargan desde Twilio del tenant.</div>
       <div id="sendMsg"></div>
@@ -69,6 +74,10 @@ function fillMeta(){
   for(const s of S.meta.stages||[])$('stage').insertAdjacentHTML('beforeend',`<option>${esc(s)}</option>`);
   for(const o of S.meta.owners||[])$('owner').insertAdjacentHTML('beforeend',`<option value="${esc(o.email)}">${esc(o.name||o.email)}</option>`);
   for(const t of S.meta.dealTypes||[])$('dtype').insertAdjacentHTML('beforeend',`<option value="${esc(t)}">${esc(S.meta.dealTypeLabels?.[t]||t)}</option>`);
+  for(const st of S.meta.stages||[])$('newDealStage').insertAdjacentHTML('beforeend',`<option value="${esc(st)}" ${st==='RECOVERY +15 DIAS'?'selected':''}>${esc(st)}</option>`);
+  for(const o of S.meta.owners||[])$('targetOwner').insertAdjacentHTML('beforeend',`<option value="${esc(o.email)}">${esc(o.name||o.email)}</option>`);
+  $('newDealStage').disabled=!$('createNewDeal').checked;
+  $('createNewDeal').onchange=()=>{$('newDealStage').disabled=!$('createNewDeal').checked};
   $('nextDue').value=plusDays(S.meta.today||new Date().toISOString().slice(0,10),7);
 }
 function plusDays(iso,n){const [y,m,d]=String(iso).split('-').map(Number);const x=new Date(Date.UTC(y,m-1,d+n));return x.toISOString().slice(0,10)}
@@ -91,7 +100,7 @@ async function load(){
     const d=await api('/api/due-center/deals?'+query());S.rows=d.deals||[];S.groups=d.groups||{};
     S.selected=new Set([...S.selected].filter(id=>S.rows.some(r=>r.id===id&&r.canSend)));
     renderStats(d.summary||{});renderGroups();updateSelection();
-    $('loadedInfo').textContent=`${S.mode==='vencidos'?'Vencidos':S.mode==='hoy'?'Hoy':'Próximos 7 días'} · ${S.rows.length} trato(s) cargados`;
+    $('loadedInfo').textContent=`${S.mode==='vencidos'?'Vencidos':S.mode==='vencidos_15'?'Vencidos +15 días':S.mode==='hoy'?'Hoy':'Próximos 7 días'} · ${S.rows.length} trato(s) cargados`;
   }catch(e){$('groupsBox').innerHTML=`<div class="dueCard"><div class="dueNotice error">${esc(e.message)}</div></div>`}
 }
 function renderStats(s){
@@ -148,17 +157,33 @@ function renderCampaigns(){
   document.querySelectorAll('[data-csub]').forEach(b=>b.onclick=()=>createSubcampaign(b.dataset.csub));
 }
 async function createCampaign(){
-  const ids=[...S.selected],contentSid=$('template').value,name=$('campaign').value.trim(),nextDueDate=$('nextDue').value;
+  const ids=[...S.selected];
+  const contentSid=$('template').value;
+  const name=$('campaign').value.trim();
+  const nextDueDate=$('nextDue').value;
+  const createNewDeal=$('createNewDeal').checked;
+  const newDealStage=$('newDealStage').value||'RECOVERY +15 DIAS';
+  const targetOwner=$('targetOwner').value||'';
   if(!ids.length)return notice('Seleccioná contactos para crear la campaña.','error');
   if(ids.length>200)return notice('La campaña admite hasta 200 contactos por cohorte.','error');
   if(!contentSid)return notice('Seleccioná una plantilla aprobada.','error');
   const campaignName=name||`Recontacto ${new Date().toLocaleDateString('es-AR')}`;
-  if(!confirm(`Crear campaña "${campaignName}" con ${ids.length} contacto(s)?`))return;
+  const changes=[
+    createNewDeal?`crear ${ids.length} trato(s) nuevo(s) en "${newDealStage}"`:'usar los tratos actuales',
+    targetOwner?`asignar owner ${targetOwner}`:'conservar owners actuales'
+  ].join(' · ');
+  if(!confirm(`Crear campaña "${campaignName}" con ${ids.length} contacto(s)?\n\n${changes}`))return;
   $('createCampaignBtn').disabled=true;
   try{
-    const d=await api('/api/due-center/campaigns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dealIds:ids,name:campaignName,contentSid,nextDueDate})});
-    notice(`Campaña creada con ${d.total} contacto(s). Ahora podés enviar los pendientes de a 30.`,'ok');
-    S.selected.clear();renderGroups();updateSelection();await loadCampaigns();
+    const d=await api('/api/due-center/campaigns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      dealIds:ids,name:campaignName,contentSid,nextDueDate,createNewDeal,newDealStage,targetOwner
+    })});
+    let msg=`Campaña creada con ${d.total} contacto(s).`;
+    if(d.migrated)msg+=` ${d.migrated} trato(s) nuevo(s) creados.`;
+    if(d.reassigned)msg+=` ${d.reassigned} trato(s) cambiaron de owner.`;
+    msg+=' Ahora podés enviar los pendientes.';
+    notice(msg,'ok');
+    S.selected.clear();renderGroups();updateSelection();await Promise.all([loadCampaigns(),load()]);
   }catch(e){notice(e.message,'error')}finally{$('createCampaignBtn').disabled=false}
 }
 async function sendCampaignBatch(id){

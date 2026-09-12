@@ -345,3 +345,13 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Delete an entire campaign without deleting CRM deals.
 - Campaign counters are adjusted when members are removed.
 - Pending members inherit campaign edits to template/next due date.
+
+## v1.5.28 — Centro de Recontacto
+- Renamed Centro de Vencimientos to Centro de Recontacto.
+- Added Vencidos +15 días mode.
+- Campaign creation can optionally create one new CRM deal per selected contact.
+- New campaign deals default to RECOVERY +15 DIAS, with selectable stage.
+- Campaign creation can optionally reassign all campaign deals to a selected owner.
+- If no owner is selected, each deal keeps its current owner.
+- When new deals are created, the original deal remains historical and the most relevant HUB conversation is relinked to the new active deal.
+- Campaign members store originalDealId and migratedDeal metadata.

@@ -312,3 +312,15 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Overdue pagination uses `dueDate` in the cursor instead of only createdAt.
 - Added a client-side safety guard so future or <15-day deals can never contaminate a `Vencidos +15 días` view.
 - Existing contaminated rows are removed from the current filtered view on the next render/load.
+
+## v1.5.25 — Centro de Vencimientos
+- Replaced the simplified `/vencimientos` Agenda view with a dedicated operational Due Center.
+- Modes: Vencidos, Hoy, Próximos 7 días.
+- Filters: stage, owner, deal type, send state, limit and search.
+- Groups deals by pipeline stage with selection by row/stage.
+- Loads approved Twilio templates from the tenant.
+- Sends approved template follow-ups to selected deals (up to 30 per batch).
+- After successful send, moves the deal due date to the selected next due date.
+- Stores per-deal follow-up history under `deals/{dealId}/message_logs`.
+- Uses the linked HUB conversation/line when available and records outbound template messages there.
+- Keeps owner permission rules from the current MR API HUB CRM.

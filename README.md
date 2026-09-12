@@ -298,3 +298,11 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Root cause fixed: hidden multi-line/ad blocks no longer shift the CSS Grid rows.
 - Explicit rows: header=1, ad=2, multi-line alert=3, messages=4, composer=5.
 - Composer remains at the bottom whether the customer has 1 line, 2 lines, advertising context, or none.
+
+## v1.5.23 — Manual read semantics
+- Opening/clicking a conversation no longer marks it as read.
+- Keeping a conversation open while live messages arrive no longer marks it as read.
+- Manual `Marcar leído` / `Marcar no leído` remains authoritative.
+- A HUMAN seller sending text, file or approved template marks the conversation as read.
+- BOT/Dialogflow replies do not mark the conversation as read.
+- New inbound customer messages still set unreadCount / hasUnread.

@@ -283,7 +283,7 @@ async function loadConversationForSend(id){
   return {ref,data:d,reads:1};
 }
 async function updateAfterSend(ref, text, mediaCount, status){
-  await ref.set({lastMessageAt:FieldValue.serverTimestamp(),lastMessagePreview:preview(text,mediaCount),updatedAt:FieldValue.serverTimestamp(),lastDeliveryStatus:status||"queued",lastMessageDirection:"OUT",lastHumanMessageAt:FieldValue.serverTimestamp(),hasUnread:false,unreadCount:0},{merge:true});
+  await ref.set({lastMessageAt:FieldValue.serverTimestamp(),lastMessagePreview:preview(text,mediaCount),updatedAt:FieldValue.serverTimestamp(),lastDeliveryStatus:status||"queued",lastMessageDirection:"OUT",lastHumanMessageAt:FieldValue.serverTimestamp(),hasUnread:false,unreadCount:0,manualUnread:false,lastReadAt:FieldValue.serverTimestamp(),lastReadBy:"human-send"},{merge:true});
 }
 async function parseSingleUpload(req){
   return new Promise((resolve,reject)=>{
@@ -664,7 +664,7 @@ router.post("/conversations/:id/mode",authRequired,async(req,res)=>{
 router.post("/conversations/:id/read",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);
-    await inboxDb.collection("conversations").doc(id).set({hasUnread:false,unreadCount:0,lastReadAt:FieldValue.serverTimestamp(),lastReadBy:req.authUser.email||req.authUser.id},{merge:true});
+    await inboxDb.collection("conversations").doc(id).set({hasUnread:false,unreadCount:0,manualUnread:false,lastReadAt:FieldValue.serverTimestamp(),lastReadBy:req.authUser.email||req.authUser.id},{merge:true});
     return res.json({ok:true,writesEstimate:1});
   }catch(e){ console.error("inbox read",e); return res.status(500).json({ok:false,error:e.message}); }
 });

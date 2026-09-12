@@ -12,6 +12,40 @@ const FieldValue = admin.firestore.FieldValue;
 const { PIPELINE_STAGES } = require("../crm/constants");
 const { visibleOwners, canSeeOwner, isAdminLike } = require("../crm/access");
 
+const RECONTACT_CAMPAIGNS="recontact_campaigns";
+const RECONTACT_PHONE_WATCH="recontact_phone_watch";
+async function markRecontactResponse(phoneRaw,inboundSid){
+  try{
+    const phone=String(phoneRaw||"").replace(/\D/g,"");
+    if(!phone)return {matched:0};
+    const watch=await crmDb.collection(RECONTACT_PHONE_WATCH).doc(phone).get();
+    if(!watch.exists)return {matched:0};
+    const entries=Array.isArray((watch.data()||{}).entries)?(watch.data()||{}).entries.slice(0,30):[];
+    let matched=0;
+    for(const entry of entries){
+      const campaignId=String(entry?.campaignId||"").trim(),dealId=String(entry?.dealId||"").trim();
+      if(!campaignId||!dealId)continue;
+      const memberRef=crmDb.collection(RECONTACT_CAMPAIGNS).doc(campaignId).collection("members").doc(dealId);
+      const member=await memberRef.get();
+      if(!member.exists)continue;
+      const status=String((member.data()||{}).status||"").toUpperCase();
+      if(status!=="SENT"&&status!=="NO_RESPONSE")continue;
+      const now=FieldValue.serverTimestamp();
+      const batch=crmDb.batch();
+      batch.set(memberRef,{status:"RESPONDED",respondedAt:now,respondedMessageSid:String(inboundSid||""),updatedAt:now},{merge:true});
+      batch.set(crmDb.collection(RECONTACT_CAMPAIGNS).doc(campaignId),{responded:FieldValue.increment(1),updatedAt:now},{merge:true});
+      batch.set(crmDb.collection("deals").doc(dealId),{lastCampaignResponseAt:now,lastCampaignResponseId:campaignId},{merge:true});
+      await batch.commit();
+      matched++;
+    }
+    if(matched)await watch.ref.set({lastResponseAt:FieldValue.serverTimestamp(),lastResponseMessageSid:String(inboundSid||"")},{merge:true});
+    return {matched};
+  }catch(e){
+    console.warn("recontact response match",e.message||String(e));
+    return {matched:0,error:e.message};
+  }
+}
+
 function iso(v) {
   try { return v?.toDate ? v.toDate().toISOString() : (v instanceof Date ? v.toISOString() : v || null); }
   catch { return null; }
@@ -809,11 +843,15 @@ router.post("/twilio/inbound",async(req,res)=>{
         }
       }catch(linkErr){console.warn("multi-line auto-link",linkErr.message)}
     }
+    let campaignResponse={matched:0};
+    if(!duplicate){
+      campaignResponse=await markRecontactResponse(from,sid);
+    }
     let botResult={skipped:true};
     if(!duplicate && shouldBot){
       botResult=await processBotInbound({conversationId,convoRef,from,to,body,inboundSid:sid});
     }
-    console.log(JSON.stringify({severity:"INFO",message:"Twilio inbound",tenant:config.tenantId,conversationId,messageSid:sid,duplicate,from,to,numMedia:media.length,referral:referral.has,shouldBot,botOk:botResult?.ok===true,botFallbackHuman:botResult?.fallbackHuman===true}));
+    console.log(JSON.stringify({severity:"INFO",message:"Twilio inbound",tenant:config.tenantId,conversationId,messageSid:sid,duplicate,from,to,numMedia:media.length,referral:referral.has,shouldBot,campaignResponses:Number(campaignResponse?.matched||0),botOk:botResult?.ok===true,botFallbackHuman:botResult?.fallbackHuman===true}));
     return twimlEmpty(res);
   }catch(e){
     console.error("twilio-inbound",e);

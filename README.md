@@ -324,3 +324,14 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Stores per-deal follow-up history under `deals/{dealId}/message_logs`.
 - Uses the linked HUB conversation/line when available and records outbound template messages there.
 - Keeps owner permission rules from the current MR API HUB CRM.
+
+## v1.5.26 — Campaigns Foundation
+- Added persistent recontact campaigns with frozen member cohorts.
+- Campaign member statuses: PENDING, SENT, RESPONDED, NO_RESPONSE, ERROR, EXCLUDED.
+- Campaign dashboard shows Todos, Respondieron, Sin respuesta, Pendientes and Errores.
+- Inbound WhatsApp replies automatically mark active campaign members as RESPONDED.
+- Responded members automatically disappear from the Sin respuesta cohort.
+- Create subcampaigns from the parent campaign's non-responders.
+- Campaigns can contain up to 200 members; sending is intentionally processed in batches of up to 30 for operational safety.
+- Automatic campaign/direct sends now add a visible CRM note plus technical log.
+- CRM deal note includes campaign, template, timestamp and next due date.

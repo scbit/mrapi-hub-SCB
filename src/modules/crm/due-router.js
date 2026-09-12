@@ -9,6 +9,31 @@ const router=express.Router();
 router.use(authRequired);
 const FieldValue=admin.firestore.FieldValue;
 
+const CAMPAIGNS="recontact_campaigns";
+const PHONE_WATCH="recontact_phone_watch";
+function nowIso(){return new Date().toISOString()}
+function noteText({campaignName,templateName,nextDueDate}){
+  return `MSJ AUTOMÁTICO ENVIADO · ${new Intl.DateTimeFormat("es-AR",{timeZone:"America/Argentina/Buenos_Aires",dateStyle:"short",timeStyle:"short"}).format(new Date())}\nCampaña: ${campaignName}\nPlantilla: ${templateName}\nPróximo vencimiento: ${nextDueDate}`;
+}
+async function addVisibleCrmNote(dealRef,oldData,note,user){
+  const prev=String(oldData?.notes||"").trim();
+  const merged=(note+(prev?`\n\n${prev}`:"")).slice(0,4000);
+  await dealRef.set({notes:merged,updatedAt:FieldValue.serverTimestamp()},{merge:true});
+  await dealRef.collection("notes").add({note,user:String(user||"sistema"),createdAt:FieldValue.serverTimestamp(),source:"recontact_campaign"});
+}
+function campaignMemberRef(campaignId,dealId){return crmDb.collection(CAMPAIGNS).doc(campaignId).collection("members").doc(dealId)}
+async function addPhoneWatch(phone,campaignId,dealId){
+  const d=digits(phone);if(!d)return;
+  await crmDb.collection(PHONE_WATCH).doc(d).set({
+    phone:d,entries:FieldValue.arrayUnion({campaignId,dealId}),updatedAt:FieldValue.serverTimestamp()
+  },{merge:true});
+}
+function campaignPublic(doc){
+  const d=doc.data()||{};
+  const ts=v=>v?.toDate?v.toDate().toISOString():(v||null);
+  return {id:doc.id,...d,createdAt:ts(d.createdAt),updatedAt:ts(d.updatedAt)};
+}
+
 function clean(v,n=500){return String(v??"").trim().slice(0,n)}
 function digits(v){return String(v||"").replace(/\D/g,"")}
 function waPhone(v){const d=digits(v);return d?`whatsapp:+${d}`:""}
@@ -193,6 +218,7 @@ router.post("/send",async(req,res)=>{
           dueDateBefore:clean(d.dueDate,40),nextDueDate,lineId:wa.ensureWhatsappPrefix(from),
           messageSid:sent.sid,user:req.authUser.email||req.authUser.name||""
         });
+        await addVisibleCrmNote(doc.ref,d,noteText({campaignName,templateName,nextDueDate}),req.authUser.email||req.authUser.name||"");
         results.push({id:doc.id,ok:true,sid:sent.sid,nextDueDate});
       }catch(err){
         await logDeal(doc.ref,{type:"due_template",status:"error",templateSid:contentSid,templateName,campaignName,error:clean(err.message,800),user:req.authUser.email||req.authUser.name||""});
@@ -202,6 +228,115 @@ router.post("/send",async(req,res)=>{
     const sent=results.filter(x=>x.ok).length;
     return res.json({ok:true,total:results.length,sent,errors:results.length-sent,results});
   }catch(e){console.error("due-center send",e);return res.status(500).json({ok:false,error:e.message});}
+});
+
+
+router.get("/campaigns",async(req,res)=>{
+  try{
+    const snap=await crmDb.collection(CAMPAIGNS).orderBy("createdAt","desc").limit(40).get();
+    let items=snap.docs.map(campaignPublic);
+    const visible=await visibleOwners(req.authUser);
+    if(Array.isArray(visible))items=items.filter(x=>!x.ownerScope?.length||x.ownerScope.some(o=>visible.includes(String(o).toLowerCase())));
+    return res.json({ok:true,items,readsEstimate:snap.size});
+  }catch(e){return res.status(500).json({ok:false,error:e.message})}
+});
+
+router.post("/campaigns",async(req,res)=>{
+  try{
+    const ids=[...new Set((Array.isArray(req.body?.dealIds)?req.body.dealIds:[]).map(x=>clean(x,180)).filter(Boolean))].slice(0,200);
+    const name=clean(req.body?.name,180)||`Recontacto ${isoDateBA()}`;
+    const contentSid=clean(req.body?.contentSid,120);
+    const nextDueDate=normalizeDate(req.body?.nextDueDate,7);
+    if(!ids.length)return res.status(400).json({ok:false,error:"Seleccioná al menos un trato"});
+    if(!contentSid)return res.status(400).json({ok:false,error:"Seleccioná una plantilla"});
+    let templateName=contentSid;try{const ts=await wa.listApprovedTemplates();const t=ts.find(x=>x.sid===contentSid);if(t)templateName=t.name||contentSid}catch{}
+    const ref=crmDb.collection(CAMPAIGNS).doc();
+    const docs=await crmDb.getAll(...ids.map(id=>crmDb.collection("deals").doc(id)));
+    const batch=crmDb.batch();let added=0,blocked=0;const owners=new Set();
+    for(const d of docs){
+      if(!d.exists)continue;const x=d.data()||{};
+      if(!(await canSeeOwner(req.authUser,x.owner)))continue;
+      let contact={};if(x.contactId){const c=await crmDb.collection("contacts").doc(String(x.contactId)).get();if(c.exists)contact=c.data()||{}}
+      const phone=waPhone(contact.phone||x.contactPhone||"");
+      const status=phone?"PENDING":"EXCLUDED";if(!phone)blocked++;
+      owners.add(String(x.owner||"").toLowerCase());
+      batch.set(ref.collection("members").doc(d.id),{
+        dealId:d.id,contactId:String(x.contactId||""),contactName:String(x.contactName||contact.name||x.title||""),
+        owner:String(x.owner||"").toLowerCase(),stage:String(x.stage||""),phone:digits(phone),status,
+        templateSid:contentSid,templateName,nextDueDate,createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()
+      });
+      added++;
+    }
+    batch.set(ref,{
+      name,type:"recontact",status:"ACTIVE",templateSid:contentSid,templateName,nextDueDate,
+      total:added,pending:Math.max(0,added-blocked),sent:0,responded:0,errors:0,excluded:blocked,
+      parentCampaignId:clean(req.body?.parentCampaignId,180),generation:Number(req.body?.generation||0)||0,
+      ownerScope:[...owners].filter(Boolean),createdBy:req.authUser.email||req.authUser.id||"",
+      createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()
+    });
+    await batch.commit();
+    return res.json({ok:true,id:ref.id,total:added,excluded:blocked,writesEstimate:added+1});
+  }catch(e){console.error("campaign create",e);return res.status(500).json({ok:false,error:e.message})}
+});
+
+router.get("/campaigns/:id/members",async(req,res)=>{
+  try{
+    const status=clean(req.query.status,30).toUpperCase();let q=crmDb.collection(CAMPAIGNS).doc(req.params.id).collection("members");
+    if(status==="SIN_RESPUESTA")q=q.where("status","in",["SENT","NO_RESPONSE"]);
+    else if(status)q=q.where("status","==",status);
+    const snap=await q.limit(250).get();
+    const items=snap.docs.map(d=>({id:d.id,...d.data(),createdAt:d.data()?.createdAt?.toDate?.()?.toISOString?.()||null,respondedAt:d.data()?.respondedAt?.toDate?.()?.toISOString?.()||null}));
+    return res.json({ok:true,items,readsEstimate:snap.size});
+  }catch(e){return res.status(500).json({ok:false,error:e.message})}
+});
+
+router.post("/campaigns/:id/send",async(req,res)=>{
+  try{
+    const cref=crmDb.collection(CAMPAIGNS).doc(req.params.id);const cs=await cref.get();if(!cs.exists)return res.status(404).json({ok:false,error:"Campaña no encontrada"});
+    const c=cs.data()||{};const limit=Math.max(1,Math.min(30,Number(req.body?.limit||30)||30));
+    const snap=await cref.collection("members").where("status","==","PENDING").limit(limit).get();
+    const results=[];
+    for(const md of snap.docs){
+      const m=md.data()||{};const dealRef=crmDb.collection("deals").doc(md.id);const ds=await dealRef.get();
+      if(!ds.exists){await md.ref.set({status:"ERROR",error:"Trato inexistente",updatedAt:FieldValue.serverTimestamp()},{merge:true});results.push({id:md.id,ok:false});continue}
+      const d=ds.data()||{};let contact={};if(d.contactId){const cx=await crmDb.collection("contacts").doc(String(d.contactId)).get();if(cx.exists)contact=cx.data()||{}}
+      const phone=waPhone(contact.phone||d.contactPhone||m.phone||"");const convo=await resolveConversation({id:md.id,...d},contact);const cd=convo?(convo.data()||{}):{};const from=cd.preferredLineId||cd.inboundTo||cd.lineId||wa.defaultFrom;
+      if(!phone||!from){await md.ref.set({status:"ERROR",error:"Sin teléfono/línea",updatedAt:FieldValue.serverTimestamp()},{merge:true});await cref.set({pending:FieldValue.increment(-1),errors:FieldValue.increment(1),updatedAt:FieldValue.serverTimestamp()},{merge:true});results.push({id:md.id,ok:false});continue}
+      try{
+        const sent=await wa.sendTemplate({from,to:phone,contentSid:c.templateSid,contentVariables:{},req,conversationId:convo?.id||""});const now=FieldValue.serverTimestamp();
+        if(convo){
+          await convo.ref.collection("messages").doc(String(sent.sid)).set({direction:"OUT",source:"recontact-campaign",text:`Plantilla enviada (${c.templateName||c.templateSid})`,body:`Plantilla enviada (${c.templateName||c.templateSid})`,from:wa.ensureWhatsappPrefix(from),to:phone,timestamp:now,createdAt:now,messageSid:sent.sid,sid:sent.sid,deliveryStatus:sent.status||"queued",template:{contentSid:c.templateSid},campaignId:cref.id,sentBy:req.authUser.name||req.authUser.email||"",sentByEmail:req.authUser.email||""},{merge:true});
+          await convo.ref.set({lastMessageAt:now,updatedAt:now,lastMessagePreview:`Plantilla campaña: ${c.name}`,lastMessageDirection:"OUT",lastHumanMessageAt:now,hasUnread:false,unreadCount:0},{merge:true});
+        }
+        await md.ref.set({status:"SENT",sentAt:now,messageSid:sent.sid,lineId:wa.ensureWhatsappPrefix(from),updatedAt:now},{merge:true});
+        await cref.set({pending:FieldValue.increment(-1),sent:FieldValue.increment(1),updatedAt:now},{merge:true});
+        await addPhoneWatch(phone,cref.id,md.id);
+        const prev=Number(d.dueMessageSentCount||0)||0;
+        await dealRef.set({dueDate:c.nextDueDate,dueMessageSentCount:prev+1,lastDueMessageAt:now,lastDueTemplateSid:c.templateSid,lastDueTemplateName:c.templateName,lastDueCampaignName:c.name,updatedAt:now},{merge:true});
+        await logDeal(dealRef,{type:"recontact_campaign",status:"sent",campaignId:cref.id,campaignName:c.name,templateSid:c.templateSid,templateName:c.templateName,nextDueDate:c.nextDueDate,messageSid:sent.sid,user:req.authUser.email||req.authUser.name||""});
+        await addVisibleCrmNote(dealRef,d,noteText({campaignName:c.name,templateName:c.templateName,nextDueDate:c.nextDueDate}),req.authUser.email||req.authUser.name||"");
+        results.push({id:md.id,ok:true});
+      }catch(err){
+        await md.ref.set({status:"ERROR",error:clean(err.message,800),updatedAt:FieldValue.serverTimestamp()},{merge:true});
+        await cref.set({pending:FieldValue.increment(-1),errors:FieldValue.increment(1),updatedAt:FieldValue.serverTimestamp()},{merge:true});
+        results.push({id:md.id,ok:false,error:err.message});
+      }
+    }
+    return res.json({ok:true,processed:results.length,sent:results.filter(x=>x.ok).length,errors:results.filter(x=>!x.ok).length,results});
+  }catch(e){console.error("campaign send",e);return res.status(500).json({ok:false,error:e.message})}
+});
+
+router.post("/campaigns/:id/subcampaign",async(req,res)=>{
+  try{
+    const parent=crmDb.collection(CAMPAIGNS).doc(req.params.id);const ps=await parent.get();if(!ps.exists)return res.status(404).json({ok:false,error:"Campaña no encontrada"});
+    const p=ps.data()||{};const ms=await parent.collection("members").where("status","in",["SENT","NO_RESPONSE"]).limit(200).get();
+    if(ms.empty)return res.status(400).json({ok:false,error:"No hay contactos sin respuesta"});
+    const name=clean(req.body?.name,180)||`${p.name} · Recontacto ${Number(p.generation||0)+1}`;
+    const ref=crmDb.collection(CAMPAIGNS).doc();const batch=crmDb.batch();
+    ms.docs.forEach(d=>batch.set(ref.collection("members").doc(d.id),{...d.data(),status:"PENDING",sentAt:null,respondedAt:null,messageSid:"",error:"",createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()}));
+    batch.set(ref,{name,type:"recontact",status:"ACTIVE",templateSid:clean(req.body?.contentSid,120)||p.templateSid,templateName:clean(req.body?.templateName,180)||p.templateName,nextDueDate:normalizeDate(req.body?.nextDueDate||p.nextDueDate,7),total:ms.size,pending:ms.size,sent:0,responded:0,errors:0,excluded:0,parentCampaignId:parent.id,generation:Number(p.generation||0)+1,ownerScope:p.ownerScope||[],createdBy:req.authUser.email||req.authUser.id||"",createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()});
+    await batch.commit();return res.json({ok:true,id:ref.id,total:ms.size});
+  }catch(e){console.error("subcampaign",e);return res.status(500).json({ok:false,error:e.message})}
 });
 
 module.exports=router;

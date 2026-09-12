@@ -50,7 +50,7 @@ router.post("/views",async(req,res)=>{
   try{
     const name=String(req.body?.name||"").trim().slice(0,80); if(!name)return res.status(400).json({ok:false,error:"Falta nombre de vista"});
     const cfg=req.body?.config&&typeof req.body.config==="object"?req.body.config:{};
-    const clean={view:["kanban","list"].includes(cfg.view)?cfg.view:"kanban",stage:String(cfg.stage||""),owner:String(cfg.owner||"").toLowerCase(),dealType:String(cfg.dealType||""),stageOrder:Array.isArray(cfg.stageOrder)?cfg.stageOrder.filter(x=>PIPELINE_STAGES.includes(x)).slice(0,50):PIPELINE_STAGES,hiddenStages:Array.isArray(cfg.hiddenStages)?cfg.hiddenStages.filter(x=>PIPELINE_STAGES.includes(x)).slice(0,50):[],collapsedStages:Array.isArray(cfg.collapsedStages)?cfg.collapsedStages.filter(x=>PIPELINE_STAGES.includes(x)).slice(0,50):[],mobileStage:PIPELINE_STAGES.includes(cfg.mobileStage)?cfg.mobileStage:"Seguimiento"};
+    const clean={view:["kanban","list"].includes(cfg.view)?cfg.view:"kanban",pipeline:["COMERCIAL","RECONTACTO"].includes(String(cfg.pipeline||"").toUpperCase())?String(cfg.pipeline).toUpperCase():"COMERCIAL",stage:String(cfg.stage||""),owner:String(cfg.owner||"").toLowerCase(),dealType:String(cfg.dealType||""),stageOrder:Array.isArray(cfg.stageOrder)?cfg.stageOrder.filter(x=>PIPELINE_STAGES.includes(x)).slice(0,50):PIPELINE_STAGES,hiddenStages:Array.isArray(cfg.hiddenStages)?cfg.hiddenStages.filter(x=>PIPELINE_STAGES.includes(x)).slice(0,50):[],collapsedStages:Array.isArray(cfg.collapsedStages)?cfg.collapsedStages.filter(x=>PIPELINE_STAGES.includes(x)).slice(0,50):[],mobileStage:PIPELINE_STAGES.includes(cfg.mobileStage)?cfg.mobileStage:"Seguimiento"};
     const ref=crmDb.collection("users").doc(req.authUser.id).collection("crmViews").doc();
     const now=admin.firestore.FieldValue.serverTimestamp(); await ref.set({name,config:clean,createdAt:now,updatedAt:now});
     return res.json({ok:true,item:{id:ref.id,name,config:clean},readsEstimate:0,writesEstimate:1});
@@ -104,6 +104,7 @@ router.get("/deals",async(req,res)=>{
       stage=String(req.query.stage||"").trim(),
       owner=String(req.query.owner||"").trim().toLowerCase(),
       dealType=String(req.query.dealType||"").trim(),
+      pipeline=String(req.query.pipeline||"").trim().toUpperCase(),
       overdueDays=Math.max(0,Math.min(3650,Number(req.query.overdueDays||0)||0)),
       cursor=dec(req.query.cursor);
     const visible=await visibleOwners(req.authUser);
@@ -112,6 +113,7 @@ router.get("/deals",async(req,res)=>{
     let q=crmDb.collection("deals");
     if(stage)q=q.where("stage","==",stage);
     if(dealType)q=q.where("dealType","==",dealType);
+    if(pipeline==="RECONTACTO")q=q.where("pipeline","==","RECONTACTO");
     if(owner)q=q.where("owner","==",owner);
     else if(Array.isArray(visible)&&visible.length===1)q=q.where("owner","==",visible[0]);
     else if(Array.isArray(visible)&&visible.length>1&&visible.length<=10)q=q.where("owner","in",visible);
@@ -133,7 +135,8 @@ router.get("/deals",async(req,res)=>{
     const contactIds=Array.from(new Set(snap.docs.map(d=>String((d.data()||{}).contactId||"")).filter(Boolean)));
     const contactDocs=contactIds.length?await crmDb.getAll(...contactIds.map(id=>crmDb.collection("contacts").doc(id))):[];
     const cmap=new Map(contactDocs.map(d=>[d.id,d.exists?(d.data()||{}):{}]));
-    const items=snap.docs.map(d=>publicDeal(d,cmap.get(String((d.data()||{}).contactId||""))));
+    let items=snap.docs.map(d=>publicDeal(d,cmap.get(String((d.data()||{}).contactId||""))));
+    if(pipeline==="COMERCIAL")items=items.filter(x=>String(x.pipeline||"COMERCIAL").toUpperCase()!=="RECONTACTO");
     return res.json({
       ok:true,
       items,

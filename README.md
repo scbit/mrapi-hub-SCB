@@ -355,3 +355,13 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - If no owner is selected, each deal keeps its current owner.
 - When new deals are created, the original deal remains historical and the most relevant HUB conversation is relinked to the new active deal.
 - Campaign members store originalDealId and migratedDeal metadata.
+
+## v1.5.29 — Same deal, different pipeline
+- Removed the incorrect "create a new deal" campaign option.
+- Campaign creation can now optionally move the SAME CRM deal to another pipeline.
+- No deal duplication: dealId, notes, files, history, contact and HUB linkage remain unchanged.
+- Added two logical pipelines: COMERCIAL and RECONTACTO.
+- CRM now has a Pipeline selector to switch between Pipeline Comercial and Pipeline Recontacto.
+- Legacy deals without a pipeline field are treated as COMERCIAL.
+- Owner reassignment remains optional and independent from pipeline movement.
+- Saved CRM views now preserve the selected pipeline.

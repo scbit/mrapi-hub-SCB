@@ -95,6 +95,47 @@ function canonicalLines(values){
   return out;
 }
 
+async function resolveOutboundRoute(conversation={}){
+  const from=normalizedLine(conversation.preferredLineId||conversation.inboundTo||conversation.lineId||wa.defaultFrom||"");
+  if(!from) return {from:"",provider:"twilio",gatewayLineId:"",gatewayTenantId:"",catalog:null,reads:0};
+
+  let reads=0, catalog=null;
+  try{
+    const snap=await inboxDb.collection(LINE_CATALOG_COLLECTION).doc(lineDocId(from)).get();
+    reads++;
+    if(snap.exists) catalog=snap.data()||{};
+  }catch(e){
+    console.warn("resolve outbound line catalog",e.message||String(e));
+  }
+
+  // Preferred line metadata from the shared line catalog is authoritative.
+  if(String(catalog?.provider||"").toLowerCase()==="meta" && String(catalog?.gatewayLineId||"").trim()){
+    return {
+      from,
+      provider:"meta",
+      gatewayLineId:String(catalog.gatewayLineId),
+      gatewayTenantId:String(catalog.gatewayTenantId||conversation.gatewayTenantId||config.gatewayTenantId||config.tenantId||""),
+      catalog,
+      reads
+    };
+  }
+
+  // Fallback for conversations created by Gateway before the catalog entry was enriched.
+  const currentLine=normalizedLine(conversation.inboundTo||conversation.lineId||"");
+  if(digits(from)===digits(currentLine) && String(conversation.provider||"").toLowerCase()==="meta" && String(conversation.gatewayLineId||"").trim()){
+    return {
+      from,
+      provider:"meta",
+      gatewayLineId:String(conversation.gatewayLineId),
+      gatewayTenantId:String(conversation.gatewayTenantId||config.gatewayTenantId||config.tenantId||""),
+      catalog,
+      reads
+    };
+  }
+
+  return {from,provider:"twilio",gatewayLineId:"",gatewayTenantId:"",catalog,reads};
+}
+
 function normalizedCustomerPhone(v){ return digits(v); }
 function conversationCustomerPhone(d={}, id=""){
   const direct=normalizedCustomerPhone(d.waFrom||d.from||d.phone||d.customerPhone||d.contactPhone||"");
@@ -730,22 +771,23 @@ router.get("/templates",authRequired,async(req,res)=>{
     const conversationId=cleanString(req.query.conversationId,180);
     if(conversationId){
       const c=await loadConversationForSend(conversationId);
-      if(String(c.data.provider||"").toLowerCase()==="meta" && String(c.data.gatewayLineId||"").trim()){
-        const templates=await wa.listGatewayTemplates({tenantId:c.data.gatewayTenantId||config.gatewayTenantId,lineId:c.data.gatewayLineId});
-        return res.json({ok:true,templates,readsEstimate:1,provider:"meta"});
+      const route=await resolveOutboundRoute(c.data);
+      if(route.provider==="meta"){
+        const templates=await wa.listGatewayTemplates({tenantId:route.gatewayTenantId,lineId:route.gatewayLineId});
+        return res.json({ok:true,templates,readsEstimate:1+route.reads,provider:"meta",lineId:route.from,gatewayLineId:route.gatewayLineId});
       }
     }
-    const templates=await wa.listApprovedTemplates(); return res.json({ok:true,templates,readsEstimate:0,provider:"twilio"});
+    const templates=await wa.listApprovedTemplates();
+    return res.json({ok:true,templates,readsEstimate:0,provider:"twilio"});
   }catch(e){console.error("templates",e);return res.status(500).json({ok:false,error:e.message});}
 });
 
 router.post("/conversations/:id/send",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const text=cleanString(req.body?.text,4000); if(!text) return res.status(400).json({ok:false,error:"Falta el mensaje"});
-    const c=await loadConversationForSend(id); const from=c.data.preferredLineId||c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
-    const useGateway=String(c.data.provider||"").toLowerCase()==="meta" && String(c.data.gatewayLineId||"").trim();
-    const sent=useGateway
-      ? await wa.sendGatewayText({tenantId:c.data.gatewayTenantId||config.gatewayTenantId,lineId:c.data.gatewayLineId,to,body:text})
+    const c=await loadConversationForSend(id); const route=await resolveOutboundRoute(c.data); const from=route.from; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
+    const sent=route.provider==="meta"
+      ? await wa.sendGatewayText({tenantId:route.gatewayTenantId,lineId:route.gatewayLineId,to,body:text})
       : await wa.sendText({from,to,body:text,req,conversationId:id});
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
     await updateAfterSend(c.ref,text,0,sent.status); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,status:sent.status||"queued",readsEstimate:1,writesEstimate:3});
@@ -756,14 +798,14 @@ router.post("/conversations/:id/send-file",authRequired,async(req,res)=>{
   try{
     if(!String(req.headers["content-type"]||"").toLowerCase().includes("multipart/form-data")) return res.status(400).json({ok:false,error:"Content-Type inválido"});
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const parsed=await parseSingleUpload(req); if(!parsed.text&&!parsed.file) return res.status(400).json({ok:false,error:"Falta texto o archivo"});
-    const c=await loadConversationForSend(id); const from=c.data.preferredLineId||c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
+    const c=await loadConversationForSend(id); const route=await resolveOutboundRoute(c.data); const from=route.from; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const media=parsed.file ? [await uploadOutbound(parsed.file)] : [];
     let sent;
-    if(String(c.data.provider||"").toLowerCase()==="meta" && String(c.data.gatewayLineId||"").trim()){
+    if(route.provider==="meta"){
       if(!parsed.file) return res.status(400).json({ok:false,error:"Falta archivo"});
       const ct=String(parsed.file.mimetype||"").toLowerCase();
       const mediaType=ct.startsWith("image/")?"image":ct.startsWith("audio/")?"audio":"document";
-      sent=await wa.sendGatewayMedia({tenantId:c.data.gatewayTenantId||config.gatewayTenantId,lineId:c.data.gatewayLineId,to,type:mediaType,mediaUrl:media[0].url,filename:parsed.file.originalname,caption:parsed.text});
+      sent=await wa.sendGatewayMedia({tenantId:route.gatewayTenantId,lineId:route.gatewayLineId,to,type:mediaType,mediaUrl:media[0].url,filename:parsed.file.originalname,caption:parsed.text});
     }else{
       sent=await wa.sendText({from,to,body:parsed.text,mediaUrls:media.map(x=>x.url),req,conversationId:id});
     }
@@ -775,13 +817,13 @@ router.post("/conversations/:id/send-file",authRequired,async(req,res)=>{
 router.post("/conversations/:id/send-template",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const contentSid=cleanString(req.body?.contentSid,100); const contentVariables=req.body?.contentVariables&&typeof req.body.contentVariables==="object"?req.body.contentVariables:{}; if(!contentSid)return res.status(400).json({ok:false,error:"Falta contentSid"});
-    const c=await loadConversationForSend(id); const from=c.data.preferredLineId||c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to)return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
+    const c=await loadConversationForSend(id); const route=await resolveOutboundRoute(c.data); const from=route.from; const to=c.data.waFrom; if(!from||!to)return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     let sent;
-    if(String(c.data.provider||"").toLowerCase()==="meta" && String(c.data.gatewayLineId||"").trim()){
+    if(route.provider==="meta"){
       const templateName=cleanString(req.body?.templateName||contentSid,180);
       const language=cleanString(req.body?.language||"es_AR",40);
       const components=Array.isArray(req.body?.components)?req.body.components:[];
-      sent=await wa.sendGatewayTemplate({tenantId:c.data.gatewayTenantId||config.gatewayTenantId,lineId:c.data.gatewayLineId,to,name:templateName,language,components});
+      sent=await wa.sendGatewayTemplate({tenantId:route.gatewayTenantId,lineId:route.gatewayLineId,to,name:templateName,language,components});
     }else{
       sent=await wa.sendTemplate({from,to,contentSid,contentVariables,req,conversationId:id});
     }

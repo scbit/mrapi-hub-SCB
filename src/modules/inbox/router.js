@@ -729,7 +729,10 @@ router.post("/conversations/:id/send",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const text=cleanString(req.body?.text,4000); if(!text) return res.status(400).json({ok:false,error:"Falta el mensaje"});
     const c=await loadConversationForSend(id); const from=c.data.preferredLineId||c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
-    const sent=await wa.sendText({from,to,body:text,req,conversationId:id});
+    const useGateway=String(c.data.provider||"").toLowerCase()==="meta" && String(c.data.gatewayLineId||"").trim();
+    const sent=useGateway
+      ? await wa.sendGatewayText({tenantId:c.data.gatewayTenantId||config.gatewayTenantId,lineId:c.data.gatewayLineId,to,body:text})
+      : await wa.sendText({from,to,body:text,req,conversationId:id});
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
     await updateAfterSend(c.ref,text,0,sent.status); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,status:sent.status||"queued",readsEstimate:1,writesEstimate:3});
   }catch(e){console.error("send",e);return res.status(e.status||500).json({ok:false,error:e.message});}
@@ -740,6 +743,7 @@ router.post("/conversations/:id/send-file",authRequired,async(req,res)=>{
     if(!String(req.headers["content-type"]||"").toLowerCase().includes("multipart/form-data")) return res.status(400).json({ok:false,error:"Content-Type inválido"});
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const parsed=await parseSingleUpload(req); if(!parsed.text&&!parsed.file) return res.status(400).json({ok:false,error:"Falta texto o archivo"});
     const c=await loadConversationForSend(id); const from=c.data.preferredLineId||c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
+    if(String(c.data.provider||"").toLowerCase()==="meta" && String(c.data.gatewayLineId||"").trim()) return res.status(501).json({ok:false,error:"Archivos por MRAPI Gateway todavía no están habilitados. Probá texto."});
     const media=parsed.file ? [await uploadOutbound(parsed.file)] : []; const sent=await wa.sendText({from,to,body:parsed.text,mediaUrls:media.map(x=>x.url),req,conversationId:id});
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text:parsed.text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:media.length,media,deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
     await updateAfterSend(c.ref,parsed.text,media.length,sent.status); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,mediaCount:media.length,readsEstimate:1,writesEstimate:3});
@@ -750,6 +754,7 @@ router.post("/conversations/:id/send-template",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const contentSid=cleanString(req.body?.contentSid,100); const contentVariables=req.body?.contentVariables&&typeof req.body.contentVariables==="object"?req.body.contentVariables:{}; if(!contentSid)return res.status(400).json({ok:false,error:"Falta contentSid"});
     const c=await loadConversationForSend(id); const from=c.data.preferredLineId||c.data.inboundTo||c.data.lineId||wa.defaultFrom; const to=c.data.waFrom; if(!from||!to)return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
+    if(String(c.data.provider||"").toLowerCase()==="meta" && String(c.data.gatewayLineId||"").trim()) return res.status(501).json({ok:false,error:"Plantillas Meta por MRAPI Gateway todavía no están habilitadas en Hub."});
     const sent=await wa.sendTemplate({from,to,contentSid,contentVariables,req,conversationId:id}); const text=`Plantilla enviada (${contentSid})`;
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human-template",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],template:{contentSid,contentVariables},deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
     await updateAfterSend(c.ref,text,0,sent.status); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,contentSid,readsEstimate:1,writesEstimate:3});

@@ -82,4 +82,24 @@ function validateInboundWebhook(req){
   const ok=twilio.validateRequest(authToken,signature,url,req.body||{});
   return {ok,url,reason:ok?"":"Firma Twilio inválida"};
 }
-module.exports={client,defaultFrom,ensureWhatsappPrefix,cleanWhatsappNumber,sendText,sendTemplate,listApprovedTemplates,downloadMedia,validateInboundWebhook,inboundWebhookUrl};
+function gatewayConfigured(){
+  return Boolean(config.gatewayUrl && config.gatewayApiKey);
+}
+async function sendGatewayText({tenantId,lineId,to,body}){
+  if(!gatewayConfigured()) throw new Error("MRAPI Gateway no configurado");
+  if(!lineId) throw new Error("Falta gatewayLineId");
+  const r=await axios.post(`${config.gatewayUrl}/v1/messages`,{
+    tenantId:String(tenantId||config.gatewayTenantId||config.tenantId),
+    lineId:String(lineId),
+    to:cleanWhatsappNumber(to),
+    type:"text",
+    text:String(body||"")
+  },{
+    headers:{"x-api-key":config.gatewayApiKey,"content-type":"application/json"},
+    timeout:20000
+  });
+  const sid=String(r.data?.id || r.data?.providerResponse?.messages?.[0]?.id || "");
+  return {sid,status:"accepted",provider:"meta",raw:r.data};
+}
+
+module.exports={client,defaultFrom,ensureWhatsappPrefix,cleanWhatsappNumber,sendText,sendTemplate,listApprovedTemplates,downloadMedia,validateInboundWebhook,inboundWebhookUrl,gatewayConfigured,sendGatewayText};

@@ -74,7 +74,8 @@ router.post("/events",async(req,res)=>{
 
     const from=wa.ensureWhatsappPrefix(`+${fromDigits}`);
     const to=wa.ensureWhatsappPrefix(`+${toDigits}`);
-    const body=event.type==="text"?clean(event.content?.text,4000):"";
+    const body=event.type==="text"?clean(event.content?.text,4000):clean(event.content?.caption,4000);
+    const media=["image","audio","document"].includes(event.type)&&event.content?.id?[{source:"gateway-meta",gatewayMediaId:String(event.content.id),gatewayLineId:clean(event.lineId,120),contentType:clean(event.content.mimeType||"application/octet-stream",160),filename:clean(event.content.filename||"",180),sha256:clean(event.content.sha256||"",180)}]:[];
     const conversationId=deterministicConversationId(from,to);
     const convoRef=inboxDb.collection("conversations").doc(conversationId);
     const msgRef=convoRef.collection("messages").doc(sid);
@@ -99,8 +100,8 @@ router.post("/events",async(req,res)=>{
         messageSid:sid,
         sid,
         waId:fromDigits,
-        numMedia:0,
-        media:[],
+        numMedia:media.length,
+        media,
         messageType:clean(event.type,80)||"unknown",
         gatewayEventId:clean(event.eventId,180),
         gatewayLineId:clean(event.lineId,120),

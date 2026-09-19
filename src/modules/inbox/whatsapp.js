@@ -102,4 +102,27 @@ async function sendGatewayText({tenantId,lineId,to,body}){
   return {sid,status:"accepted",provider:"meta",raw:r.data};
 }
 
-module.exports={client,defaultFrom,ensureWhatsappPrefix,cleanWhatsappNumber,sendText,sendTemplate,listApprovedTemplates,downloadMedia,validateInboundWebhook,inboundWebhookUrl,gatewayConfigured,sendGatewayText};
+
+async function sendGatewayMedia({tenantId,lineId,to,type,mediaUrl,filename,caption}){
+  if(!gatewayConfigured()) throw new Error("MRAPI Gateway no configurado");
+  const r=await axios.post(`${config.gatewayUrl}/v1/messages`,{tenantId:String(tenantId||config.gatewayTenantId||config.tenantId),lineId:String(lineId),to:cleanWhatsappNumber(to),type,mediaUrl,filename,caption},{headers:{"x-api-key":config.gatewayApiKey,"content-type":"application/json"},timeout:30000});
+  const sid=String(r.data?.id||r.data?.providerResponse?.messages?.[0]?.id||"");
+  return {sid,status:"accepted",provider:"meta",raw:r.data};
+}
+async function listGatewayTemplates({tenantId,lineId}){
+  if(!gatewayConfigured()) throw new Error("MRAPI Gateway no configurado");
+  const r=await axios.get(`${config.gatewayUrl}/v1/templates`,{params:{tenantId:String(tenantId||config.gatewayTenantId||config.tenantId),lineId:String(lineId)},headers:{"x-api-key":config.gatewayApiKey},timeout:20000});
+  return (r.data?.templates||[]).map(t=>({sid:t.name,name:t.name,language:t.language||"",provider:"meta",components:t.components||[],category:t.category||""}));
+}
+async function sendGatewayTemplate({tenantId,lineId,to,name,language,components=[]}){
+  if(!gatewayConfigured()) throw new Error("MRAPI Gateway no configurado");
+  const r=await axios.post(`${config.gatewayUrl}/v1/messages`,{tenantId:String(tenantId||config.gatewayTenantId||config.tenantId),lineId:String(lineId),to:cleanWhatsappNumber(to),type:"template",template:{name,language:language||"es_AR",components}},{headers:{"x-api-key":config.gatewayApiKey,"content-type":"application/json"},timeout:30000});
+  const sid=String(r.data?.id||r.data?.providerResponse?.messages?.[0]?.id||"");
+  return {sid,status:"accepted",provider:"meta",raw:r.data};
+}
+async function downloadGatewayMedia({lineId,mediaId}){
+  if(!gatewayConfigured()) throw new Error("MRAPI Gateway no configurado");
+  const r=await axios.get(`${config.gatewayUrl}/v1/media/${encodeURIComponent(mediaId)}`,{params:{lineId},headers:{"x-api-key":config.gatewayApiKey},responseType:"arraybuffer",timeout:30000});
+  return {buffer:Buffer.from(r.data),contentType:String(r.headers["content-type"]||"application/octet-stream")};
+}
+module.exports={client,defaultFrom,ensureWhatsappPrefix,cleanWhatsappNumber,sendText,sendTemplate,listApprovedTemplates,downloadMedia,validateInboundWebhook,inboundWebhookUrl,gatewayConfigured,sendGatewayText,sendGatewayMedia,listGatewayTemplates,sendGatewayTemplate,downloadGatewayMedia};

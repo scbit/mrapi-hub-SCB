@@ -2,6 +2,12 @@
 const express = require("express");
 const Busboy = require("busboy");
 const crypto = require("crypto");
+const fs = require("fs/promises");
+const os = require("os");
+const path = require("path");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+const execFileAsync = promisify(execFile);
 const config = require("../../core/config");
 const { inboxDb, crmDb, deskDb, admin, storage } = require("../../core/google");
 const wa = require("./whatsapp");
@@ -369,15 +375,36 @@ async function parseSingleUpload(req){
     bb.on("error",reject); bb.on("finish",()=>limited?reject(new Error("El archivo supera 15 MB")):resolve({text,file:fileData})); req.pipe(bb);
   });
 }
+async function normalizeOutboundAudio(file){
+  const mt=String(file?.mimetype||"").toLowerCase();
+  if(!mt.startsWith("audio/")) return file;
+  if(["audio/ogg","audio/mpeg","audio/mp4","audio/aac","audio/amr"].includes(mt)) return file;
+  if(mt!=="audio/webm") throw Object.assign(new Error("Formato de audio no compatible."),{status:400});
+  const id=crypto.randomBytes(8).toString("hex");
+  const input=path.join(os.tmpdir(),`mrapi-${id}.webm`);
+  const output=path.join(os.tmpdir(),`mrapi-${id}.ogg`);
+  try{
+    await fs.writeFile(input,file.buffer);
+    await execFileAsync("ffmpeg",["-y","-i",input,"-vn","-c:a","libopus","-b:a","32k","-application","voip",output],{timeout:30000,maxBuffer:1024*1024});
+    const buffer=await fs.readFile(output);
+    return {...file,buffer,size:buffer.length,mimetype:"audio/ogg",originalname:String(file.originalname||"audio.webm").replace(/\.webm$/i,".ogg")};
+  }catch(e){
+    console.error("audio transcode",e?.stderr||e);
+    throw Object.assign(new Error("No se pudo preparar el audio para WhatsApp."),{status:500});
+  }finally{
+    await Promise.allSettled([fs.unlink(input),fs.unlink(output)]);
+  }
+}
 async function uploadOutbound(file){
   if(!config.filesBucket) throw new Error("MRAPI_FILES_BUCKET no configurado");
-  const allowed=new Set(["application/pdf","image/jpeg","image/png","image/webp"]);
-  if(!allowed.has(file.mimetype)) throw Object.assign(new Error("Tipo de archivo no permitido. Usá PDF, JPG, PNG o WEBP."),{status:400});
+  file=await normalizeOutboundAudio(file);
+  const allowed=new Set(["application/pdf","image/jpeg","image/png","image/webp","audio/ogg","audio/mpeg","audio/mp4","audio/aac","audio/amr"]);
+  if(!allowed.has(file.mimetype)) throw Object.assign(new Error("Tipo de archivo no permitido. Usá PDF, JPG, PNG, WEBP o audio."),{status:400});
   const safe=String(file.originalname||"archivo").replace(/[^a-zA-Z0-9._-]+/g,"_").slice(-100);
-  const path=`whatsapp-out/${Date.now()}-${crypto.randomBytes(6).toString("hex")}-${safe}`;
-  const obj=storage.bucket(config.filesBucket).file(path); await obj.save(file.buffer,{contentType:file.mimetype,resumable:false,metadata:{cacheControl:"private, max-age=3600"}});
+  const objectPath=`whatsapp-out/${Date.now()}-${crypto.randomBytes(6).toString("hex")}-${safe}`;
+  const obj=storage.bucket(config.filesBucket).file(objectPath); await obj.save(file.buffer,{contentType:file.mimetype,resumable:false,metadata:{cacheControl:"private, max-age=3600"}});
   const [signedUrl]=await obj.getSignedUrl({action:"read",expires:Date.now()+60*60*1000});
-  return {url:signedUrl,gcsPath:path,filename:file.originalname,contentType:file.mimetype,source:"gcs"};
+  return {url:signedUrl,gcsPath:objectPath,filename:file.originalname,contentType:file.mimetype,source:"gcs"};
 }
 function mediaExtension(contentType){
   const ct=String(contentType||"").toLowerCase();
@@ -767,6 +794,19 @@ router.post("/desk/sso",authRequired,async(req,res)=>{
   }catch(e){ console.error("desk sso",e); return res.status(500).json({ok:false,error:e.message||"No se pudo iniciar Desk"}); }
 });
 
+router.get("/bot/status",authRequired,async(req,res)=>{
+  const configured=dialogflow.configured();
+  if(!configured) return res.json({ok:true,configured:false,ready:false,error:"Faltan DF_PROJECT_ID / DF_AGENT_ID / DF_LOCATION en Cloud Run"});
+  if(String(req.query.test||"")!=="1") return res.json({ok:true,configured:true,ready:true});
+  try{
+    const detected=await dialogflow.detectIntent({conversationId:`bot-health-${Date.now()}`,text:"hola"});
+    return res.json({ok:true,configured:true,ready:true,response:detected.text||"",matchType:detected.rawMatchType||""});
+  }catch(e){
+    console.error("bot status",e?.response?.data||e);
+    return res.status(502).json({ok:false,configured:true,ready:false,error:e?.response?.data?.error?.message||e.message||"Dialogflow error"});
+  }
+});
+
 router.get("/templates",authRequired,async(req,res)=>{
   try{
     const conversationId=cleanString(req.query.conversationId,180);
@@ -828,8 +868,10 @@ router.post("/conversations/:id/send-template",authRequired,async(req,res)=>{
     }else{
       sent=await wa.sendTemplate({from,to,contentSid,contentVariables,req,conversationId:id});
     }
-    const text=`Plantilla enviada (${contentSid})`;
-    await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human-template",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],template:{contentSid,contentVariables},deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
+    const displayText=cleanString(req.body?.displayText,4000);
+    const templateNameForDisplay=cleanString(req.body?.templateName||contentSid,180);
+    const text=displayText || `Plantilla: ${templateNameForDisplay}`;
+    await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human-template",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],template:{contentSid,contentVariables,name:templateNameForDisplay,displayText:text},deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
     await updateAfterSend(c.ref,text,0,sent.status); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,contentSid,readsEstimate:1,writesEstimate:3});
   }catch(e){console.error("send-template",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });

@@ -365,3 +365,4 @@ body{
     overflow:hidden;
   }
 }
+.audioRecordBtn{white-space:nowrap}.audioRecordBtn.recording{border-color:#dc2626!important;color:#b91c1c!important;background:#fef2f2!important}

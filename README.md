@@ -365,3 +365,7 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 - Legacy deals without a pipeline field are treated as COMERCIAL.
 - Owner reassignment remains optional and independent from pipeline movement.
 - Saved CRM views now preserve the selected pipeline.
+
+
+## v1.5.36
+Conversaciones separadas por contacto + línea; sin mezcla de historiales ni cambio de línea en conversaciones existentes.

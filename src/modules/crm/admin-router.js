@@ -159,6 +159,76 @@ router.get("/my-status/deals",async(req,res)=>{try{
 }catch(e){res.status(e.status||500).json({ok:false,error:e.message||String(e)});}});
 
 
+function campaignOwnerEmail(req){return cleanOwner(req.authUser?.email||"");}
+async function getOwnedCampaign(req,id){
+  const ref=crmDb.collection("personalCampaigns").doc(String(id||""));
+  const snap=await ref.get();
+  if(!snap.exists){const e=new Error("Campaña no encontrada");e.status=404;throw e;}
+  const data=snap.data()||{};
+  if(cleanOwner(data.ownerEmail)!==campaignOwnerEmail(req)){const e=new Error("Sin permiso sobre esta campaña");e.status=403;throw e;}
+  return {ref,snap,data};
+}
+function publicCampaign(doc){const x=doc.data()||{};return {id:doc.id,name:String(x.name||""),description:String(x.description||""),memberCount:Number(x.memberCount||0),createdAt:tsMillis(x.createdAt)||0,updatedAt:tsMillis(x.updatedAt)||0};}
+function publicCampaignDeal(id,x){return {id,title:String(x.title||"Trato"),contactName:String(x.contactName||""),company:String(x.company||""),stage:String(x.stage||""),dueDate:String(x.dueDate||""),owner:cleanOwner(x.owner),leadQuality:qualityKey(x.leadQuality),value:Number(x.value||0),updatedAt:tsMillis(x.updatedAt)||0};}
+
+router.get("/my-campaigns",async(req,res)=>{try{
+  const ownerEmail=campaignOwnerEmail(req);if(!ownerEmail)return res.status(400).json({ok:false,error:"Usuario sin email"});
+  const snap=await crmDb.collection("personalCampaigns").where("ownerEmail","==",ownerEmail).limit(100).get();
+  const items=snap.docs.map(publicCampaign).sort((a,b)=>b.updatedAt-a.updatedAt||a.name.localeCompare(b.name));
+  return res.json({ok:true,items,readsEstimate:snap.size});
+}catch(e){return res.status(e.status||500).json({ok:false,error:e.message||String(e)});}});
+
+router.post("/my-campaigns",async(req,res)=>{try{
+  const ownerEmail=campaignOwnerEmail(req),name=String(req.body?.name||"").trim(),description=String(req.body?.description||"").trim();
+  if(!ownerEmail)return res.status(400).json({ok:false,error:"Usuario sin email"});
+  if(!name)return res.status(400).json({ok:false,error:"Escribí un nombre para la campaña"});
+  if(name.length>80||description.length>300)return res.status(400).json({ok:false,error:"Nombre o descripción demasiado largos"});
+  const existing=await crmDb.collection("personalCampaigns").where("ownerEmail","==",ownerEmail).limit(100).get();
+  if(existing.size>=100)return res.status(400).json({ok:false,error:"Máximo 100 campañas personales"});
+  if(existing.docs.some(d=>String((d.data()||{}).name||"").trim().toLowerCase()===name.toLowerCase()))return res.status(409).json({ok:false,error:"Ya tenés una campaña con ese nombre"});
+  const ref=crmDb.collection("personalCampaigns").doc(),now=new Date();
+  await ref.set({name,description,ownerEmail,ownerUserId:String(req.authUser?.id||""),memberCount:0,createdAt:now,updatedAt:now});
+  const snap=await ref.get();return res.json({ok:true,item:publicCampaign(snap),readsEstimate:existing.size+1,writesEstimate:1});
+}catch(e){return res.status(e.status||500).json({ok:false,error:e.message||String(e)});}});
+
+router.put("/my-campaigns/:id",async(req,res)=>{try{
+  const c=await getOwnedCampaign(req,req.params.id),p={updatedAt:new Date()};
+  if(Object.prototype.hasOwnProperty.call(req.body||{},"name")){const name=String(req.body.name||"").trim();if(!name)return res.status(400).json({ok:false,error:"El nombre no puede quedar vacío"});if(name.length>80)return res.status(400).json({ok:false,error:"Nombre demasiado largo"});p.name=name;}
+  if(Object.prototype.hasOwnProperty.call(req.body||{},"description")){const description=String(req.body.description||"").trim();if(description.length>300)return res.status(400).json({ok:false,error:"Descripción demasiado larga"});p.description=description;}
+  await c.ref.update(p);const updated=await c.ref.get();return res.json({ok:true,item:publicCampaign(updated),readsEstimate:2,writesEstimate:1});
+}catch(e){return res.status(e.status||500).json({ok:false,error:e.message||String(e)});}});
+
+router.delete("/my-campaigns/:id",async(req,res)=>{try{
+  const c=await getOwnedCampaign(req,req.params.id);let deleted=0;
+  for(;;){const snap=await c.ref.collection("members").limit(400).get();if(!snap.size)break;const batch=crmDb.batch();for(const d of snap.docs){batch.delete(d.ref);deleted++;}await batch.commit();if(snap.size<400)break;}
+  await c.ref.delete();return res.json({ok:true,readsEstimate:1+deleted,writesEstimate:1+deleted});
+}catch(e){return res.status(e.status||500).json({ok:false,error:e.message||String(e)});}});
+
+router.get("/my-campaigns/:id/members",async(req,res)=>{try{
+  const c=await getOwnedCampaign(req,req.params.id),members=await c.ref.collection("members").orderBy("addedAt","desc").limit(500).get();
+  const refs=members.docs.map(d=>crmDb.collection("deals").doc(d.id));
+  const docs=refs.length?await crmDb.getAll(...refs):[];const vis=await visibleOwners(req.authUser);
+  const map=new Map(docs.filter(d=>d.exists).map(d=>[d.id,d.data()||{}]));
+  const items=[];for(const m of members.docs){const x=map.get(m.id);if(!x)continue;const own=cleanOwner(x.owner);if(Array.isArray(vis)&&!vis.includes(own))continue;items.push({...publicCampaignDeal(m.id,x),addedAt:tsMillis((m.data()||{}).addedAt)||0});}
+  return res.json({ok:true,campaign:publicCampaign(c.snap),items,readsEstimate:1+members.size+docs.length});
+}catch(e){return res.status(e.status||500).json({ok:false,error:e.message||String(e)});}});
+
+router.post("/my-campaigns/:id/members",async(req,res)=>{try{
+  const c=await getOwnedCampaign(req,req.params.id),dealId=String(req.body?.dealId||"").trim();if(!dealId)return res.status(400).json({ok:false,error:"Falta el trato"});
+  const dealRef=crmDb.collection("deals").doc(dealId),deal=await dealRef.get();if(!deal.exists)return res.status(404).json({ok:false,error:"Trato no encontrado"});
+  const data=deal.data()||{};if(!(await canSeeOwner(req.authUser,data.owner)))return res.status(403).json({ok:false,error:"Sin permiso sobre el trato"});
+  const memberRef=c.ref.collection("members").doc(dealId);let added=false;
+  await crmDb.runTransaction(async tx=>{const ms=await tx.get(memberRef);if(ms.exists)return;tx.set(memberRef,{dealId,addedAt:new Date(),addedBy:campaignOwnerEmail(req)});tx.update(c.ref,{memberCount:admin.firestore.FieldValue.increment(1),updatedAt:new Date()});added=true;});
+  return res.json({ok:true,added,item:publicCampaignDeal(dealId,data),readsEstimate:2,writesEstimate:added?2:0});
+}catch(e){return res.status(e.status||500).json({ok:false,error:e.message||String(e)});}});
+
+router.delete("/my-campaigns/:id/members/:dealId",async(req,res)=>{try{
+  const c=await getOwnedCampaign(req,req.params.id),memberRef=c.ref.collection("members").doc(String(req.params.dealId||""));let removed=false;
+  await crmDb.runTransaction(async tx=>{const ms=await tx.get(memberRef);if(!ms.exists)return;tx.delete(memberRef);tx.update(c.ref,{memberCount:admin.firestore.FieldValue.increment(-1),updatedAt:new Date()});removed=true;});
+  return res.json({ok:true,removed,readsEstimate:2,writesEstimate:removed?2:0});
+}catch(e){return res.status(e.status||500).json({ok:false,error:e.message||String(e)});}});
+
+
 router.get("/my-ads",async(req,res)=>{try{
   const range=periodRange(req.query.period,req.query.start,req.query.end);
   const ownerFilter=cleanOwner(req.query.owner||"");

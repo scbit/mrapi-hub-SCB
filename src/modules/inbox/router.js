@@ -554,7 +554,11 @@ router.get("/conversations/search",authRequired,async(req,res)=>{
 
 router.get("/conversations/:id",authRequired,async(req,res)=>{
   try{
-    const id=cleanString(decodeURIComponent(req.params.id||""),220);if(!id)return res.status(400).json({ok:false,error:"Conversación inválida"});
+    let id=cleanString(decodeURIComponent(req.params.id||""),220);if(!id)return res.status(400).json({ok:false,error:"Conversación inválida"});
+    // Shareable URL alias: <contactPhone>__<linePhone>. Internally we continue using
+    // the deterministic hashed Firestore conversation id.
+    const readable=id.match(/^(\d{6,20})__(\d{6,20})$/);
+    if(readable) id=deterministicConversationId(readable[1],readable[2]);
     const snap=await inboxDb.collection("conversations").doc(id).get();if(!snap.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
     return res.json({ok:true,item:summary(snap),readsEstimate:1});
   }catch(e){return res.status(500).json({ok:false,error:e.message});}

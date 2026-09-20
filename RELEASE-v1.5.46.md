@@ -1,4 +1,4 @@
-# MRAPI Hub SCB v1.5.46
+# MRAPI Hub SCB v1.5.47
 
 - Link corto de conversación: `/inbox?conversationId=<contacto>__<linea>`.
 - Se eliminan `chat` y `line` de la URL compartible.

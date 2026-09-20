@@ -1,4 +1,4 @@
-# MRAPI Hub SCB v1.5.46
+# MRAPI Hub SCB v1.5.47
 
 - Mi Estado > TOTAL: cálculo exacto con COUNT, sin truncar al llegar a 10.000 tratos.
 - Si faltan índices, fallback paginado para no devolver totales parciales.

@@ -11,6 +11,7 @@ const FieldValue=admin.firestore.FieldValue;
 
 const CAMPAIGNS="recontact_campaigns";
 const PHONE_WATCH="recontact_phone_watch";
+const LINE_CATALOG_COLLECTION="mrapi_line_catalog";
 function nowIso(){return new Date().toISOString()}
 function noteText({campaignName,templateName,nextDueDate}){
   return `MSJ AUTOMÁTICO ENVIADO · ${new Intl.DateTimeFormat("es-AR",{timeZone:"America/Argentina/Buenos_Aires",dateStyle:"short",timeStyle:"short"}).format(new Date())}\nCampaña: ${campaignName}\nPlantilla: ${templateName}\nPróximo vencimiento: ${nextDueDate}`;
@@ -76,6 +77,65 @@ async function getContacts(rows){
   const docs=ids.length?await crmDb.getAll(...ids.map(id=>crmDb.collection("contacts").doc(id))):[];
   return new Map(docs.map(d=>[d.id,d.exists?(d.data()||{}):{}]));
 }
+function normalizedLine(v){return wa.ensureWhatsappPrefix(clean(v,120));}
+function lineDocId(v){const d=digits(v);return d||clean(v,120).replace(/[^a-zA-Z0-9_-]+/g,"_");}
+async function resolveOutboundRoute(conversation={}){
+  const from=normalizedLine(conversation.inboundTo||conversation.lineId||conversation.preferredLineId||wa.defaultFrom||"");
+  if(!from)return {from:"",provider:"twilio",gatewayLineId:"",gatewayTenantId:"",catalog:null};
+  if(String(conversation.provider||"").toLowerCase()==="meta"&&clean(conversation.gatewayLineId,120)){
+    return {from,provider:"meta",gatewayLineId:clean(conversation.gatewayLineId,120),gatewayTenantId:clean(conversation.gatewayTenantId,120)||process.env.MRAPI_GATEWAY_TENANT_ID||"",catalog:null};
+  }
+  try{
+    const snap=await inboxDb.collection(LINE_CATALOG_COLLECTION).doc(lineDocId(from)).get();
+    if(snap.exists){
+      const c=snap.data()||{};
+      if(c.active!==false&&String(c.provider||"").toLowerCase()==="meta"&&clean(c.gatewayLineId,120)){
+        return {from:normalizedLine(c.lineId||c.phone||from)||from,provider:"meta",gatewayLineId:clean(c.gatewayLineId,120),gatewayTenantId:clean(c.gatewayTenantId,120)||clean(conversation.gatewayTenantId,120)||process.env.MRAPI_GATEWAY_TENANT_ID||"",catalog:c};
+      }
+    }
+  }catch(e){console.warn("due resolve route",e.message||String(e))}
+  return {from,provider:"twilio",gatewayLineId:"",gatewayTenantId:"",catalog:null};
+}
+async function listRecontactTemplates(){
+  let twilio=[];const metaMap=new Map();
+  try{twilio=(await wa.listApprovedTemplates()).map(t=>({...t,provider:"twilio"}));}catch(e){console.warn("due twilio templates",e.message||String(e))}
+  if(wa.gatewayConfigured()){
+    try{
+      const lines=await inboxDb.collection(LINE_CATALOG_COLLECTION).limit(500).get();
+      for(const doc of lines.docs){
+        const x=doc.data()||{};
+        if(x.active===false||String(x.provider||"").toLowerCase()!=="meta"||!clean(x.gatewayLineId,120))continue;
+        try{
+          const items=await wa.listGatewayTemplates({tenantId:clean(x.gatewayTenantId,120)||process.env.MRAPI_GATEWAY_TENANT_ID||"",lineId:clean(x.gatewayLineId,120)});
+          for(const t of items){
+            const key=`${clean(t.name,180)}|${clean(t.language,40)||"es_AR"}`;
+            const prev=metaMap.get(key)||{sid:clean(t.name,180),name:clean(t.name,180),language:clean(t.language,40)||"es_AR",category:clean(t.category,80),provider:"meta",lineIds:[]};
+            if(!prev.lineIds.includes(clean(x.gatewayLineId,120)))prev.lineIds.push(clean(x.gatewayLineId,120));
+            metaMap.set(key,prev);
+          }
+        }catch(e){console.warn("due meta templates line",clean(x.gatewayLineId,120),e.message||String(e))}
+      }
+    }catch(e){console.warn("due meta templates catalog",e.message||String(e))}
+  }
+  const meta=[...metaMap.values()].sort((a,b)=>a.name.localeCompare(b.name,"es",{sensitivity:"base"}));
+  return {twilio,meta};
+}
+function selectedTemplate(body={},route={},campaign={}){
+  if(route.provider==="meta"){
+    const name=clean(body.metaTemplateName||campaign.metaTemplateName,180);
+    const language=clean(body.metaTemplateLanguage||campaign.metaTemplateLanguage,40)||"es_AR";
+    if(!name)throw new Error("Falta plantilla Meta para una línea Cloud API");
+    return {provider:"meta",name,language,label:name};
+  }
+  const sid=clean(body.twilioTemplateSid||body.contentSid||campaign.twilioTemplateSid||campaign.templateSid,120);
+  const label=clean(body.twilioTemplateName||body.templateName||campaign.twilioTemplateName||campaign.templateName,180)||sid;
+  if(!sid)throw new Error("Falta plantilla Twilio para una línea Twilio");
+  return {provider:"twilio",sid,label};
+}
+async function sendRoutedTemplate({route,to,template,req,conversationId}){
+  if(route.provider==="meta")return wa.sendGatewayTemplate({tenantId:route.gatewayTenantId,lineId:route.gatewayLineId,to,name:template.name,language:template.language,components:[]});
+  return wa.sendTemplate({from:route.from,to,contentSid:template.sid,contentVariables:{},req,conversationId});
+}
 async function resolveConversation(deal,contact){
   let snap=await inboxDb.collection("conversations").where("dealId","==",deal.id).limit(5).get();
   if(!snap.empty){
@@ -108,8 +168,8 @@ router.get("/meta",async(req,res)=>{
 
 router.get("/templates",async(req,res)=>{
   try{
-    const templates=await wa.listApprovedTemplates();
-    return res.json({ok:true,templates});
+    const {twilio,meta}=await listRecontactTemplates();
+    return res.json({ok:true,twilio,meta,templates:[...twilio,...meta]});
   }catch(e){return res.status(500).json({ok:false,error:e.message});}
 });
 
@@ -174,16 +234,17 @@ router.post("/send",async(req,res)=>{
   try{
     const ids=[...new Set((Array.isArray(req.body?.dealIds)?req.body.dealIds:[]).map(x=>clean(x,180)).filter(Boolean))].slice(0,30);
     const contentSid=clean(req.body?.contentSid,120);
+    const twilioTemplateSid=clean(req.body?.twilioTemplateSid||contentSid,120);
+    const metaTemplateName=clean(req.body?.metaTemplateName,180);
+    const metaTemplateLanguage=clean(req.body?.metaTemplateLanguage,40)||"es_AR";
     const campaignName=clean(req.body?.campaignName,180)||`Vencimientos ${isoDateBA()}`;
     const nextDueDate=normalizeDate(req.body?.nextDueDate,7);
     if(!ids.length)return res.status(400).json({ok:false,error:"Seleccioná al menos un trato"});
-    if(!contentSid)return res.status(400).json({ok:false,error:"Seleccioná una plantilla aprobada"});
+    if(!twilioTemplateSid&&!metaTemplateName)return res.status(400).json({ok:false,error:"Seleccioná al menos una plantilla (Meta o Twilio)"});
     const refs=ids.map(id=>crmDb.collection("deals").doc(id));
     const docs=await crmDb.getAll(...refs);
-    let templateName=contentSid;
-    try{
-      const ts=await wa.listApprovedTemplates();const t=ts.find(x=>x.sid===contentSid);if(t)templateName=t.name||contentSid;
-    }catch{}
+    let twilioTemplateName=twilioTemplateSid;
+    try{const ts=await wa.listApprovedTemplates();const t=ts.find(x=>x.sid===twilioTemplateSid);if(t)twilioTemplateName=t.name||twilioTemplateSid;}catch{}
     const results=[];
     for(const doc of docs){
       if(!doc.exists){results.push({id:doc.id,ok:false,error:"Trato inexistente"});continue;}
@@ -196,33 +257,36 @@ router.post("/send",async(req,res)=>{
       const deal={id:doc.id,...d};
       const convo=await resolveConversation(deal,contact);
       const cd=convo?(convo.data()||{}):{};
-      const from=cd.preferredLineId||cd.inboundTo||cd.lineId||wa.defaultFrom;
-      if(!from){results.push({id:doc.id,ok:false,error:"Sin línea WhatsApp"});continue;}
+      const route=await resolveOutboundRoute(cd);
+      if(!route.from){results.push({id:doc.id,ok:false,error:"Sin línea WhatsApp"});continue;}
       try{
-        const sent=await wa.sendTemplate({from,to:phone,contentSid,contentVariables:{},req,conversationId:convo?.id||""});
+        const template=selectedTemplate({twilioTemplateSid,twilioTemplateName,metaTemplateName,metaTemplateLanguage},route);
+        const sent=await sendRoutedTemplate({route,to:phone,template,req,conversationId:convo?.id||""});
+        const templateName=template.label;
+        const templateId=template.provider==="meta"?template.name:template.sid;
         const now=FieldValue.serverTimestamp();
         if(convo){
           await convo.ref.collection("messages").doc(String(sent.sid)).set({
-            direction:"OUT",source:"due-center",text:`Plantilla enviada (${contentSid})`,body:`Plantilla enviada (${contentSid})`,
-            from:wa.ensureWhatsappPrefix(from),to:phone,timestamp:now,createdAt:now,messageSid:sent.sid,sid:sent.sid,
-            deliveryStatus:sent.status||"queued",template:{contentSid},sentBy:req.authUser.name||req.authUser.email||"",sentByEmail:req.authUser.email||""
+            direction:"OUT",source:"due-center",text:`Plantilla enviada (${templateName})`,body:`Plantilla enviada (${templateName})`,
+            from:wa.ensureWhatsappPrefix(route.from),to:phone,timestamp:now,createdAt:now,messageSid:sent.sid,sid:sent.sid,provider:template.provider,
+            deliveryStatus:sent.status||"queued",template:template.provider==="meta"?{name:template.name,language:template.language}:{contentSid:template.sid},sentBy:req.authUser.name||req.authUser.email||"",sentByEmail:req.authUser.email||""
           },{merge:true});
           await convo.ref.set({lastMessageAt:now,updatedAt:now,lastMessagePreview:`Plantilla enviada (${templateName})`,lastMessageDirection:"OUT",lastHumanMessageAt:now,hasUnread:false,unreadCount:0},{merge:true});
         }
         const prev=Number(d.dueMessageSentCount||0)||0;
         await doc.ref.set({
-          dueDate:nextDueDate,dueMessageSentCount:prev+1,lastDueMessageAt:now,lastDueTemplateSid:contentSid,lastDueTemplateName:templateName,
+          dueDate:nextDueDate,dueMessageSentCount:prev+1,lastDueMessageAt:now,lastDueTemplateSid:templateId,lastDueTemplateName:templateName,lastDueProvider:template.provider,
           lastDueCampaignName:campaignName,updatedAt:now
         },{merge:true});
         await logDeal(doc.ref,{
-          type:"due_template",status:"sent",templateSid:contentSid,templateName,campaignName,
-          dueDateBefore:clean(d.dueDate,40),nextDueDate,lineId:wa.ensureWhatsappPrefix(from),
+          type:"due_template",status:"sent",provider:template.provider,templateSid:templateId,templateName,campaignName,
+          dueDateBefore:clean(d.dueDate,40),nextDueDate,lineId:wa.ensureWhatsappPrefix(route.from),gatewayLineId:route.gatewayLineId||"",
           messageSid:sent.sid,user:req.authUser.email||req.authUser.name||""
         });
         await addVisibleCrmNote(doc.ref,d,noteText({campaignName,templateName,nextDueDate}),req.authUser.email||req.authUser.name||"");
         results.push({id:doc.id,ok:true,sid:sent.sid,nextDueDate});
       }catch(err){
-        await logDeal(doc.ref,{type:"due_template",status:"error",templateSid:contentSid,templateName,campaignName,error:clean(err.message,800),user:req.authUser.email||req.authUser.name||""});
+        await logDeal(doc.ref,{type:"due_template",status:"error",templateSid:twilioTemplateSid||metaTemplateName,templateName:twilioTemplateName||metaTemplateName,campaignName,error:clean(err.message,800),user:req.authUser.email||req.authUser.name||""});
         results.push({id:doc.id,ok:false,error:err.message});
       }
     }
@@ -247,17 +311,21 @@ router.post("/campaigns",async(req,res)=>{
     const ids=[...new Set((Array.isArray(req.body?.dealIds)?req.body.dealIds:[]).map(x=>clean(x,180)).filter(Boolean))].slice(0,200);
     const name=clean(req.body?.name,180)||`Recontacto ${isoDateBA()}`;
     const contentSid=clean(req.body?.contentSid,120);
+    const twilioTemplateSid=clean(req.body?.twilioTemplateSid||contentSid,120);
+    const metaTemplateName=clean(req.body?.metaTemplateName,180);
+    const metaTemplateLanguage=clean(req.body?.metaTemplateLanguage,40)||"es_AR";
     const nextDueDate=normalizeDate(req.body?.nextDueDate,7);
     const movePipeline=Boolean(req.body?.movePipeline);
     const targetPipeline=["COMERCIAL","RECONTACTO"].includes(clean(req.body?.targetPipeline,40).toUpperCase())?clean(req.body?.targetPipeline,40).toUpperCase():"RECONTACTO";
     const targetOwner=clean(req.body?.targetOwner,220).toLowerCase();
 
     if(!ids.length)return res.status(400).json({ok:false,error:"Seleccioná al menos un trato"});
-    if(!contentSid)return res.status(400).json({ok:false,error:"Seleccioná una plantilla"});
+    if(!twilioTemplateSid&&!metaTemplateName)return res.status(400).json({ok:false,error:"Seleccioná al menos una plantilla (Meta o Twilio)"});
     if(targetOwner && !(await canSeeOwner(req.authUser,targetOwner)))return res.status(403).json({ok:false,error:"No podés asignar ese owner"});
 
-    let templateName=contentSid;
-    try{const ts=await wa.listApprovedTemplates();const t=ts.find(x=>x.sid===contentSid);if(t)templateName=t.name||contentSid}catch{}
+    let twilioTemplateName=twilioTemplateSid;
+    try{const ts=await wa.listApprovedTemplates();const t=ts.find(x=>x.sid===twilioTemplateSid);if(t)twilioTemplateName=t.name||twilioTemplateSid}catch{}
+    const templateName=metaTemplateName&&twilioTemplateName?`Meta: ${metaTemplateName} · Twilio: ${twilioTemplateName}`:(metaTemplateName||twilioTemplateName);
 
     const ref=crmDb.collection(CAMPAIGNS).doc();
     const docs=await crmDb.getAll(...ids.map(id=>crmDb.collection("deals").doc(id)));
@@ -316,14 +384,14 @@ router.post("/campaigns",async(req,res)=>{
         originalPipeline:currentPipeline,
         phone:digits(phone),
         status,
-        templateSid:contentSid,templateName,nextDueDate,
+        templateSid:twilioTemplateSid,templateName,twilioTemplateSid,twilioTemplateName,metaTemplateName,metaTemplateLanguage,nextDueDate,
         createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()
       });
       added++;
     }
 
     batch.set(ref,{
-      name,type:"recontact",status:"ACTIVE",templateSid:contentSid,templateName,nextDueDate,
+      name,type:"recontact",status:"ACTIVE",templateSid:twilioTemplateSid,templateName,twilioTemplateSid,twilioTemplateName,metaTemplateName,metaTemplateLanguage,nextDueDate,
       total:added,pending:Math.max(0,added-blocked),sent:0,responded:0,errors:0,excluded:blocked,
       movePipeline,targetPipeline:movePipeline?targetPipeline:"",targetOwner:targetOwner||"",
       movedDeals:moved,reassignedDeals:reassigned,
@@ -362,21 +430,23 @@ router.post("/campaigns/:id/send",async(req,res)=>{
       const m=md.data()||{};const dealRef=crmDb.collection("deals").doc(md.id);const ds=await dealRef.get();
       if(!ds.exists){await md.ref.set({status:"ERROR",error:"Trato inexistente",updatedAt:FieldValue.serverTimestamp()},{merge:true});results.push({id:md.id,ok:false});continue}
       const d=ds.data()||{};let contact={};if(d.contactId){const cx=await crmDb.collection("contacts").doc(String(d.contactId)).get();if(cx.exists)contact=cx.data()||{}}
-      const phone=waPhone(contact.phone||d.contactPhone||m.phone||"");const convo=await resolveConversation({id:md.id,...d},contact);const cd=convo?(convo.data()||{}):{};const from=cd.preferredLineId||cd.inboundTo||cd.lineId||wa.defaultFrom;
-      if(!phone||!from){await md.ref.set({status:"ERROR",error:"Sin teléfono/línea",updatedAt:FieldValue.serverTimestamp()},{merge:true});await cref.set({pending:FieldValue.increment(-1),errors:FieldValue.increment(1),updatedAt:FieldValue.serverTimestamp()},{merge:true});results.push({id:md.id,ok:false});continue}
+      const phone=waPhone(contact.phone||d.contactPhone||m.phone||"");const convo=await resolveConversation({id:md.id,...d},contact);const cd=convo?(convo.data()||{}):{};const route=await resolveOutboundRoute(cd);
+      if(!phone||!route.from){await md.ref.set({status:"ERROR",error:"Sin teléfono/línea",updatedAt:FieldValue.serverTimestamp()},{merge:true});await cref.set({pending:FieldValue.increment(-1),errors:FieldValue.increment(1),updatedAt:FieldValue.serverTimestamp()},{merge:true});results.push({id:md.id,ok:false});continue}
       try{
-        const sent=await wa.sendTemplate({from,to:phone,contentSid:c.templateSid,contentVariables:{},req,conversationId:convo?.id||""});const now=FieldValue.serverTimestamp();
+        const template=selectedTemplate({},route,c);
+        const sent=await sendRoutedTemplate({route,to:phone,template,req,conversationId:convo?.id||""});const now=FieldValue.serverTimestamp();
+        const templateName=template.label;const templateId=template.provider==="meta"?template.name:template.sid;
         if(convo){
-          await convo.ref.collection("messages").doc(String(sent.sid)).set({direction:"OUT",source:"recontact-campaign",text:`Plantilla enviada (${c.templateName||c.templateSid})`,body:`Plantilla enviada (${c.templateName||c.templateSid})`,from:wa.ensureWhatsappPrefix(from),to:phone,timestamp:now,createdAt:now,messageSid:sent.sid,sid:sent.sid,deliveryStatus:sent.status||"queued",template:{contentSid:c.templateSid},campaignId:cref.id,sentBy:req.authUser.name||req.authUser.email||"",sentByEmail:req.authUser.email||""},{merge:true});
+          await convo.ref.collection("messages").doc(String(sent.sid)).set({direction:"OUT",source:"recontact-campaign",text:`Plantilla enviada (${templateName})`,body:`Plantilla enviada (${templateName})`,from:wa.ensureWhatsappPrefix(route.from),to:phone,timestamp:now,createdAt:now,messageSid:sent.sid,sid:sent.sid,provider:template.provider,deliveryStatus:sent.status||"queued",template:template.provider==="meta"?{name:template.name,language:template.language}:{contentSid:template.sid},campaignId:cref.id,sentBy:req.authUser.name||req.authUser.email||"",sentByEmail:req.authUser.email||""},{merge:true});
           await convo.ref.set({lastMessageAt:now,updatedAt:now,lastMessagePreview:`Plantilla campaña: ${c.name}`,lastMessageDirection:"OUT",lastHumanMessageAt:now,hasUnread:false,unreadCount:0},{merge:true});
         }
-        await md.ref.set({status:"SENT",sentAt:now,messageSid:sent.sid,lineId:wa.ensureWhatsappPrefix(from),updatedAt:now},{merge:true});
+        await md.ref.set({status:"SENT",sentAt:now,messageSid:sent.sid,lineId:wa.ensureWhatsappPrefix(route.from),gatewayLineId:route.gatewayLineId||"",provider:template.provider,updatedAt:now},{merge:true});
         await cref.set({pending:FieldValue.increment(-1),sent:FieldValue.increment(1),updatedAt:now},{merge:true});
         await addPhoneWatch(phone,cref.id,md.id);
         const prev=Number(d.dueMessageSentCount||0)||0;
-        await dealRef.set({dueDate:c.nextDueDate,dueMessageSentCount:prev+1,lastDueMessageAt:now,lastDueTemplateSid:c.templateSid,lastDueTemplateName:c.templateName,lastDueCampaignName:c.name,updatedAt:now},{merge:true});
-        await logDeal(dealRef,{type:"recontact_campaign",status:"sent",campaignId:cref.id,campaignName:c.name,templateSid:c.templateSid,templateName:c.templateName,nextDueDate:c.nextDueDate,messageSid:sent.sid,user:req.authUser.email||req.authUser.name||""});
-        await addVisibleCrmNote(dealRef,d,noteText({campaignName:c.name,templateName:c.templateName,nextDueDate:c.nextDueDate}),req.authUser.email||req.authUser.name||"");
+        await dealRef.set({dueDate:c.nextDueDate,dueMessageSentCount:prev+1,lastDueMessageAt:now,lastDueTemplateSid:templateId,lastDueTemplateName:templateName,lastDueProvider:template.provider,lastDueCampaignName:c.name,updatedAt:now},{merge:true});
+        await logDeal(dealRef,{type:"recontact_campaign",status:"sent",provider:template.provider,campaignId:cref.id,campaignName:c.name,templateSid:templateId,templateName,nextDueDate:c.nextDueDate,messageSid:sent.sid,lineId:route.from,gatewayLineId:route.gatewayLineId||"",user:req.authUser.email||req.authUser.name||""});
+        await addVisibleCrmNote(dealRef,d,noteText({campaignName:c.name,templateName,nextDueDate:c.nextDueDate}),req.authUser.email||req.authUser.name||"");
         results.push({id:md.id,ok:true});
       }catch(err){
         await md.ref.set({status:"ERROR",error:clean(err.message,800),updatedAt:FieldValue.serverTimestamp()},{merge:true});
@@ -396,19 +466,20 @@ router.patch("/campaigns/:id",async(req,res)=>{
     const old=snap.data()||{};
     const name=clean(req.body?.name,180)||old.name||"Campaña";
     const nextDueDate=normalizeDate(req.body?.nextDueDate||old.nextDueDate,7);
-    const contentSid=clean(req.body?.contentSid,120)||old.templateSid||"";
-    let templateName=clean(req.body?.templateName,180)||old.templateName||contentSid;
-    if(contentSid && contentSid!==old.templateSid){
-      try{const ts=await wa.listApprovedTemplates();const t=ts.find(x=>x.sid===contentSid);if(t)templateName=t.name||contentSid}catch{}
-    }
-    await ref.set({name,nextDueDate,templateSid:contentSid,templateName,updatedAt:FieldValue.serverTimestamp()},{merge:true});
+    const twilioTemplateSid=clean(req.body?.twilioTemplateSid||req.body?.contentSid,120)||old.twilioTemplateSid||old.templateSid||"";
+    let twilioTemplateName=clean(req.body?.twilioTemplateName,180)||old.twilioTemplateName||twilioTemplateSid;
+    const metaTemplateName=clean(req.body?.metaTemplateName,180)||old.metaTemplateName||"";
+    const metaTemplateLanguage=clean(req.body?.metaTemplateLanguage,40)||old.metaTemplateLanguage||"es_AR";
+    if(twilioTemplateSid && twilioTemplateSid!==(old.twilioTemplateSid||old.templateSid)){try{const ts=await wa.listApprovedTemplates();const t=ts.find(x=>x.sid===twilioTemplateSid);if(t)twilioTemplateName=t.name||twilioTemplateSid}catch{}}
+    const templateName=metaTemplateName&&twilioTemplateName?`Meta: ${metaTemplateName} · Twilio: ${twilioTemplateName}`:(metaTemplateName||twilioTemplateName);
+    await ref.set({name,nextDueDate,templateSid:twilioTemplateSid,templateName,twilioTemplateSid,twilioTemplateName,metaTemplateName,metaTemplateLanguage,updatedAt:FieldValue.serverTimestamp()},{merge:true});
     const pending=await ref.collection("members").where("status","==","PENDING").limit(250).get();
     if(!pending.empty){
       const batch=crmDb.batch();
-      pending.docs.forEach(d=>batch.set(d.ref,{templateSid:contentSid,templateName,nextDueDate,updatedAt:FieldValue.serverTimestamp()},{merge:true}));
+      pending.docs.forEach(d=>batch.set(d.ref,{templateSid:twilioTemplateSid,templateName,twilioTemplateSid,twilioTemplateName,metaTemplateName,metaTemplateLanguage,nextDueDate,updatedAt:FieldValue.serverTimestamp()},{merge:true}));
       await batch.commit();
     }
-    return res.json({ok:true,id:ref.id,name,nextDueDate,templateSid:contentSid,templateName,writesEstimate:1+pending.size});
+    return res.json({ok:true,id:ref.id,name,nextDueDate,templateSid:twilioTemplateSid,templateName,twilioTemplateSid,twilioTemplateName,metaTemplateName,metaTemplateLanguage,writesEstimate:1+pending.size});
   }catch(e){console.error("campaign update",e);return res.status(500).json({ok:false,error:e.message})}
 });
 
@@ -437,7 +508,7 @@ router.post("/campaigns/:id/members",async(req,res)=>{
       batch.set(ref.collection("members").doc(d.id),{
         dealId:d.id,contactId:String(x.contactId||""),contactName:String(x.contactName||contact.name||x.title||""),
         owner:String(x.owner||"").toLowerCase(),stage:String(x.stage||""),phone:digits(phone),status,
-        templateSid:c.templateSid||"",templateName:c.templateName||"",nextDueDate:c.nextDueDate||"",
+        templateSid:c.twilioTemplateSid||c.templateSid||"",templateName:c.templateName||"",twilioTemplateSid:c.twilioTemplateSid||c.templateSid||"",twilioTemplateName:c.twilioTemplateName||"",metaTemplateName:c.metaTemplateName||"",metaTemplateLanguage:c.metaTemplateLanguage||"es_AR",nextDueDate:c.nextDueDate||"",
         createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()
       });
       added++;
@@ -496,7 +567,7 @@ router.post("/campaigns/:id/subcampaign",async(req,res)=>{
     const name=clean(req.body?.name,180)||`${p.name} · Recontacto ${Number(p.generation||0)+1}`;
     const ref=crmDb.collection(CAMPAIGNS).doc();const batch=crmDb.batch();
     ms.docs.forEach(d=>batch.set(ref.collection("members").doc(d.id),{...d.data(),status:"PENDING",sentAt:null,respondedAt:null,messageSid:"",error:"",createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()}));
-    batch.set(ref,{name,type:"recontact",status:"ACTIVE",templateSid:clean(req.body?.contentSid,120)||p.templateSid,templateName:clean(req.body?.templateName,180)||p.templateName,nextDueDate:normalizeDate(req.body?.nextDueDate||p.nextDueDate,7),total:ms.size,pending:ms.size,sent:0,responded:0,errors:0,excluded:0,parentCampaignId:parent.id,generation:Number(p.generation||0)+1,ownerScope:p.ownerScope||[],createdBy:req.authUser.email||req.authUser.id||"",createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()});
+    batch.set(ref,{name,type:"recontact",status:"ACTIVE",templateSid:clean(req.body?.twilioTemplateSid||req.body?.contentSid,120)||p.twilioTemplateSid||p.templateSid,twilioTemplateSid:clean(req.body?.twilioTemplateSid||req.body?.contentSid,120)||p.twilioTemplateSid||p.templateSid,twilioTemplateName:clean(req.body?.twilioTemplateName,180)||p.twilioTemplateName||"",metaTemplateName:clean(req.body?.metaTemplateName,180)||p.metaTemplateName||"",metaTemplateLanguage:clean(req.body?.metaTemplateLanguage,40)||p.metaTemplateLanguage||"es_AR",templateName:clean(req.body?.templateName,180)||p.templateName,nextDueDate:normalizeDate(req.body?.nextDueDate||p.nextDueDate,7),total:ms.size,pending:ms.size,sent:0,responded:0,errors:0,excluded:0,parentCampaignId:parent.id,generation:Number(p.generation||0)+1,ownerScope:p.ownerScope||[],createdBy:req.authUser.email||req.authUser.id||"",createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()});
     await batch.commit();return res.json({ok:true,id:ref.id,total:ms.size});
   }catch(e){console.error("subcampaign",e);return res.status(500).json({ok:false,error:e.message})}
 });

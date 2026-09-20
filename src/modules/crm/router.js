@@ -14,7 +14,19 @@ function ts(v){if(!v)return null;if(v.toDate)return v.toDate().toISOString();if(
 function enc(doc){if(!doc)return "";const d=doc.data()||{};return Buffer.from(JSON.stringify({id:doc.id,createdAt:ts(d.createdAt),dueDate:String(d.dueDate||"")})).toString("base64url");}
 function dec(v){try{return JSON.parse(Buffer.from(String(v||""),"base64url").toString("utf8"));}catch{return null;}}
 function normalizeDoc(doc){const d=doc.data()||{};return {id:doc.id,...d,createdAt:ts(d.createdAt),updatedAt:ts(d.updatedAt)};}
-function publicDeal(doc,contact){const d=normalizeDoc(doc);return {...d,contactPhone:String(contact?.phone||d.contactPhone||""),company:String(contact?.company||d.company||"")};}
+function dueDateIso(v){
+  try{
+    if(!v)return "";
+    if(v.toDate)return v.toDate().toISOString().slice(0,10);
+    if(v instanceof Date)return v.toISOString().slice(0,10);
+    const s=String(v).trim();
+    const m=s.match(/^(\d{4}-\d{2}-\d{2})/);if(m)return m[1];
+    const d=new Date(s);return Number.isNaN(d.getTime())?"":d.toISOString().slice(0,10);
+  }catch{return "";}
+}
+function todayBA(){return new Intl.DateTimeFormat("en-CA",{timeZone:"America/Argentina/Buenos_Aires",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());}
+function addDaysIso(base,days){const [y,m,d]=String(base).split("-").map(Number);return new Date(Date.UTC(y,m-1,d+days)).toISOString().slice(0,10);}
+function publicDeal(doc,contact){const d=normalizeDoc(doc);return {...d,dueDate:dueDateIso(d.dueDate),contactPhone:String(contact?.phone||d.contactPhone||""),company:String(contact?.company||d.company||"")};}
 function cleanLimit(v,def=50){return Math.max(1,Math.min(100,Number(v||def)||def));}
 
 function sanitizeFilename(v){return String(v||"archivo").replace(/[^a-zA-Z0-9._() -]+/g,"_").replace(/\s+/g," ").trim().slice(-140)||"archivo";}
@@ -109,6 +121,32 @@ router.get("/deals",async(req,res)=>{
       cursor=dec(req.query.cursor);
     const visible=await visibleOwners(req.authUser);
     if(owner&&visible!==null&&!visible.includes(owner))return res.status(403).json({ok:false,error:"Owner fuera de tus permisos"});
+
+    if(overdueDays){
+      const cutoffStr=addDaysIso(todayBA(),-overdueDays);
+      const all=[];let last=null,reads=0;
+      for(let page=0;page<10;page++){
+        let aq=crmDb.collection("deals").orderBy(admin.firestore.FieldPath.documentId(),"asc").limit(1000);
+        if(last)aq=aq.startAfter(last);
+        const as=await aq.get();reads+=as.size;all.push(...as.docs);
+        if(as.size<1000)break;last=as.docs[as.docs.length-1];
+      }
+      const filtered=all.filter(doc=>{
+        const x=doc.data()||{},own=String(x.owner||"").trim().toLowerCase(),pipe=String(x.pipeline||"COMERCIAL").toUpperCase();
+        if(owner&&own!==owner)return false;
+        if(!owner&&Array.isArray(visible)&&!visible.includes(own))return false;
+        if(stage&&String(x.stage||"")!==stage)return false;
+        if(dealType&&String(x.dealType||"")!==dealType)return false;
+        if(pipeline==="RECONTACTO"&&pipe!=="RECONTACTO")return false;
+        if(pipeline==="COMERCIAL"&&pipe==="RECONTACTO")return false;
+        const due=dueDateIso(x.dueDate);return !!due&&due<=cutoffStr;
+      }).sort((a,b)=>dueDateIso((a.data()||{}).dueDate).localeCompare(dueDateIso((b.data()||{}).dueDate))||a.id.localeCompare(b.id));
+      const contactIds=Array.from(new Set(filtered.map(d=>String((d.data()||{}).contactId||"")).filter(Boolean)));
+      const contactDocs=contactIds.length?await crmDb.getAll(...contactIds.map(id=>crmDb.collection("contacts").doc(id))):[];reads+=contactDocs.length;
+      const cmap=new Map(contactDocs.map(d=>[d.id,d.exists?(d.data()||{}):{}]));
+      const items=filtered.map(d=>publicDeal(d,cmap.get(String((d.data()||{}).contactId||""))));
+      return res.json({ok:true,items,overdueDays,totalMatching:items.length,nextCursor:"",hasMore:false,readsEstimate:reads,cutoffDate:cutoffStr});
+    }
 
     let q=crmDb.collection("deals");
     if(stage)q=q.where("stage","==",stage);

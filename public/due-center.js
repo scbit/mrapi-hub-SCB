@@ -1,6 +1,6 @@
 (()=>{'use strict';
 const TK='mrapi_hub_token',UK='mrapi_hub_user';
-const S={token:localStorage.getItem(TK)||'',user:null,meta:null,templates:[],rows:[],groups:{},campaigns:[],selected:new Set(),reads:0,mode:'vencidos'};
+const S={token:localStorage.getItem(TK)||'',user:null,meta:null,templates:[],twilioTemplates:[],metaTemplates:[],rows:[],groups:{},campaigns:[],selected:new Set(),reads:0,mode:'vencidos'};
 try{S.user=JSON.parse(localStorage.getItem(UK)||'null')}catch{}
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
@@ -15,7 +15,7 @@ function shell(){
   document.body.innerHTML=`<div class="dueShell">
   <header class="dueTop"><a class="dueBrand" href="/"><img src="/assets/tenant-logo"><div><b>MR API HUB</b><small>${esc(window.MRAPI_TENANT?.shortName||'MRAPI')}</small></div></a>
     <nav><a href="/inbox">▣ Bandeja</a><a class="active" href="/crm">▦ CRM</a><a href="/">◇ HUB</a></nav>
-    <span class="spacer"></span><span class="version-pill">v1.5.29</span><span class="who">${esc(S.user?.name||S.user?.email||'')}</span>
+    <span class="spacer"></span><span class="version-pill">v1.5.48</span><span class="who">${esc(S.user?.name||S.user?.email||'')}</span>
   </header>
   <main class="dueMain">
     <div class="dueHead"><div><h1>Centro de Recontacto</h1><p>Campañas de recontacto, vencidos y seguimiento comercial.</p></div><span class="spacer"></span><a class="btn secondary" href="/agenda">Agenda</a></div>
@@ -39,7 +39,8 @@ function shell(){
     <section class="sendCard">
       <div class="sendHead"><div><b id="selectedPill">0 seleccionados</b><span>Crear campaña o hacer un envío directo</span></div><button class="btn secondary small" id="clearSel">Limpiar selección</button></div>
       <div class="sendGrid">
-        <label>Plantilla<select id="template"><option value="">Seleccionar plantilla...</option></select></label>
+        <label>Plantilla Meta Cloud API<select id="metaTemplate"><option value="">No usar / seleccionar...</option></select></label>
+        <label>Plantilla Twilio<select id="twilioTemplate"><option value="">No usar / seleccionar...</option></select></label>
         <label>Próximo vencimiento<input type="date" id="nextDue"></label>
         <label>Nombre campaña<input id="campaign" placeholder="Ej. Seguimiento vencidos septiembre"></label>
         <div class="sendActions"><button class="btn secondary sendBtn" id="createCampaignBtn">Crear campaña</button><button class="btn sendBtn" id="sendBtn">Enviar directo</button></div>
@@ -49,7 +50,7 @@ function shell(){
         <label>Pipeline destino<select id="targetPipeline"><option value="RECONTACTO">Recontacto</option><option value="COMERCIAL">Comercial</option></select></label>
         <label>Owner de los tratos<select id="targetOwner"><option value="">Conservar owner actual</option></select></label>
       </div>
-      <div class="sendHint" id="templateHint">Las plantillas se cargan desde Twilio del tenant.</div>
+      <div class="sendHint" id="templateHint">Podés configurar Meta Cloud API y Twilio al mismo tiempo. Cada trato se envía por el proveedor de su línea actual.</div>
       <div id="sendMsg"></div>
     </section>
 
@@ -82,10 +83,15 @@ function fillMeta(){
 function plusDays(iso,n){const [y,m,d]=String(iso).split('-').map(Number);const x=new Date(Date.UTC(y,m-1,d+n));return x.toISOString().slice(0,10)}
 async function loadTemplates(){
   try{
-    const d=await api('/api/due-center/templates');S.templates=d.templates||[];
-    $('template').innerHTML='<option value="">Seleccionar plantilla...</option>'+S.templates.map(t=>`<option value="${esc(t.sid)}">${esc(t.name)}${t.language?' · '+esc(t.language):''}${t.category?' · '+esc(t.category):''}</option>`).join('');
-    $('templateHint').textContent=S.templates.length?`${S.templates.length} plantilla(s) aprobada(s) disponibles.`:'No hay plantillas aprobadas.';
+    const d=await api('/api/due-center/templates');S.twilioTemplates=d.twilio||[];S.metaTemplates=d.meta||[];S.templates=[...S.metaTemplates,...S.twilioTemplates];
+    $('metaTemplate').innerHTML='<option value="">No usar / seleccionar...</option>'+S.metaTemplates.map(t=>`<option value="${esc(t.name)}" data-language="${esc(t.language||'es_AR')}">${esc(t.name)}${t.language?' · '+esc(t.language):''}${t.category?' · '+esc(t.category):''}</option>`).join('');
+    $('twilioTemplate').innerHTML='<option value="">No usar / seleccionar...</option>'+S.twilioTemplates.map(t=>`<option value="${esc(t.sid)}">${esc(t.name)}${t.language?' · '+esc(t.language):''}${t.category?' · '+esc(t.category):''}</option>`).join('');
+    $('templateHint').textContent=`Meta: ${S.metaTemplates.length} plantilla(s) · Twilio: ${S.twilioTemplates.length} plantilla(s). El sistema elige según la línea de cada conversación.`;
   }catch(e){$('templateHint').textContent='No se pudieron cargar plantillas: '+e.message}
+}
+function selectedTemplatePayload(){
+  const meta=$('metaTemplate');const tw=$('twilioTemplate');
+  return {metaTemplateName:meta?.value||'',metaTemplateLanguage:meta?.selectedOptions?.[0]?.dataset?.language||'es_AR',twilioTemplateSid:tw?.value||'',twilioTemplateName:tw?.selectedOptions?.[0]?.textContent||''};
 }
 function query(){
   const p=new URLSearchParams({mode:S.mode,limit:$('limit').value||'100'});
@@ -157,7 +163,7 @@ function renderCampaigns(){
 }
 async function createCampaign(){
   const ids=[...S.selected];
-  const contentSid=$('template').value;
+  const tpl=selectedTemplatePayload();
   const name=$('campaign').value.trim();
   const nextDueDate=$('nextDue').value;
   const movePipeline=$('movePipeline').checked;
@@ -166,7 +172,7 @@ async function createCampaign(){
 
   if(!ids.length)return notice('Seleccioná contactos para crear la campaña.','error');
   if(ids.length>200)return notice('La campaña admite hasta 200 contactos por cohorte.','error');
-  if(!contentSid)return notice('Seleccioná una plantilla aprobada.','error');
+  if(!tpl.metaTemplateName&&!tpl.twilioTemplateSid)return notice('Seleccioná al menos una plantilla Meta o Twilio.','error');
 
   const campaignName=name||`Recontacto ${new Date().toLocaleDateString('es-AR')}`;
   const changes=[
@@ -179,7 +185,7 @@ async function createCampaign(){
   $('createCampaignBtn').disabled=true;
   try{
     const d=await api('/api/due-center/campaigns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-      dealIds:ids,name:campaignName,contentSid,nextDueDate,movePipeline,targetPipeline,targetOwner
+      dealIds:ids,name:campaignName,...tpl,nextDueDate,movePipeline,targetPipeline,targetOwner
     })});
 
     let msg=`Campaña creada con ${d.total} contacto(s).`;
@@ -203,11 +209,12 @@ async function createSubcampaign(id){
   const parent=S.campaigns.find(x=>x.id===id);if(!parent)return;
   const name=prompt('Nombre de la subcampaña',`${parent.name} · Recontacto ${Number(parent.generation||0)+1}`);
   if(!name)return;
-  const contentSid=$('template').value||parent.templateSid;
-  const templateName=$('template').selectedOptions?.[0]?.textContent||parent.templateName||'';
+  const tpl=selectedTemplatePayload();
+  const payloadTpl={metaTemplateName:tpl.metaTemplateName||parent.metaTemplateName||'',metaTemplateLanguage:tpl.metaTemplateName?tpl.metaTemplateLanguage:(parent.metaTemplateLanguage||'es_AR'),twilioTemplateSid:tpl.twilioTemplateSid||parent.twilioTemplateSid||parent.templateSid||'',twilioTemplateName:tpl.twilioTemplateSid?tpl.twilioTemplateName:(parent.twilioTemplateName||'')};
+  const templateName=[payloadTpl.metaTemplateName&&('Meta: '+payloadTpl.metaTemplateName),payloadTpl.twilioTemplateName&&('Twilio: '+payloadTpl.twilioTemplateName)].filter(Boolean).join(' · ')||parent.templateName||'';
   const nextDueDate=$('nextDue').value||parent.nextDueDate;
   try{
-    const d=await api('/api/due-center/campaigns/'+encodeURIComponent(id)+'/subcampaign',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,contentSid,templateName,nextDueDate})});
+    const d=await api('/api/due-center/campaigns/'+encodeURIComponent(id)+'/subcampaign',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,...payloadTpl,templateName,nextDueDate})});
     notice(`Subcampaña creada con ${d.total} contacto(s) sin respuesta.`,'ok');await loadCampaigns();
   }catch(e){notice(e.message,'error')}
 }
@@ -215,12 +222,14 @@ async function openCampaignManager(id,status=''){
   const c=S.campaigns.find(x=>x.id===id);if(!c)return;
   $('modalBack').classList.add('open');
   $('modalTitle').textContent='Gestionar campaña';
-  const templateOpts=S.templates.map(t=>`<option value="${esc(t.sid)}" ${t.sid===c.templateSid?'selected':''}>${esc(t.name)}${t.language?' · '+esc(t.language):''}</option>`).join('');
+  const metaOpts=S.metaTemplates.map(t=>`<option value="${esc(t.name)}" data-language="${esc(t.language||'es_AR')}" ${t.name===c.metaTemplateName?'selected':''}>${esc(t.name)}${t.language?' · '+esc(t.language):''}</option>`).join('');
+  const twilioOpts=S.twilioTemplates.map(t=>`<option value="${esc(t.sid)}" ${t.sid===(c.twilioTemplateSid||c.templateSid)?'selected':''}>${esc(t.name)}${t.language?' · '+esc(t.language):''}</option>`).join('');
   $('modalBody').innerHTML=`<div class="campaignManager">
     <section class="campaignEditCard">
       <div class="campaignEditGrid">
         <label>Nombre campaña<input id="cmName" value="${esc(c.name||'')}"></label>
-        <label>Plantilla<select id="cmTemplate"><option value="">Seleccionar...</option>${templateOpts}</select></label>
+        <label>Plantilla Meta<select id="cmMetaTemplate"><option value="">No usar</option>${metaOpts}</select></label>
+        <label>Plantilla Twilio<select id="cmTwilioTemplate"><option value="">No usar</option>${twilioOpts}</select></label>
         <label>Próximo vencimiento<input id="cmDue" type="date" value="${esc(c.nextDueDate||'')}"></label>
         <button class="btn" id="cmSave">Guardar cambios</button>
       </div>
@@ -272,14 +281,16 @@ async function loadCampaignMembersIntoManager(id,status=''){
 }
 async function saveCampaign(id){
   const c=S.campaigns.find(x=>x.id===id);if(!c)return;
-  const contentSid=$('cmTemplate').value,name=$('cmName').value.trim(),nextDueDate=$('cmDue').value;
-  const templateName=$('cmTemplate').selectedOptions?.[0]?.textContent||c.templateName||'';
+  const name=$('cmName').value.trim(),nextDueDate=$('cmDue').value;
+  const metaEl=$('cmMetaTemplate'),twEl=$('cmTwilioTemplate');
+  const metaTemplateName=metaEl.value,metaTemplateLanguage=metaEl.selectedOptions?.[0]?.dataset?.language||c.metaTemplateLanguage||'es_AR',twilioTemplateSid=twEl.value,twilioTemplateName=twEl.selectedOptions?.[0]?.textContent||c.twilioTemplateName||'';
+  const templateName=[metaTemplateName&&('Meta: '+metaTemplateName),twilioTemplateName&&('Twilio: '+twilioTemplateName)].filter(Boolean).join(' · ');
   if(!name)return alert('Poné un nombre a la campaña');
   $('cmSave').disabled=true;
   try{
-    await api('/api/due-center/campaigns/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,contentSid,templateName,nextDueDate})});
+    await api('/api/due-center/campaigns/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,...payloadTpl,templateName,nextDueDate})});
     notice('Campaña actualizada.','ok');await loadCampaigns();
-    const fresh=S.campaigns.find(x=>x.id===id);if(fresh){c.name=fresh.name;c.templateSid=fresh.templateSid;c.templateName=fresh.templateName;c.nextDueDate=fresh.nextDueDate}
+    const fresh=S.campaigns.find(x=>x.id===id);if(fresh){Object.assign(c,fresh)}
   }catch(e){alert(e.message)}finally{if($('cmSave'))$('cmSave').disabled=false}
 }
 async function deleteCampaign(id){
@@ -310,14 +321,14 @@ async function removeCampaignMember(id,dealId,status=''){
 }
 
 async function sendSelected(){
-  const ids=[...S.selected],sid=$('template').value,nextDue=$('nextDue').value,campaign=$('campaign').value.trim();
-  if(!ids.length)return notice('Seleccioná al menos un trato.','error');if(!sid)return notice('Seleccioná una plantilla aprobada.','error');
+  const ids=[...S.selected],tpl=selectedTemplatePayload(),nextDue=$('nextDue').value,campaign=$('campaign').value.trim();
+  if(!ids.length)return notice('Seleccioná al menos un trato.','error');if(!tpl.metaTemplateName&&!tpl.twilioTemplateSid)return notice('Seleccioná al menos una plantilla Meta o Twilio.','error');
   if(ids.length>30)return notice('Por seguridad, enviá hasta 30 tratos por tanda.','error');
-  const name=$('template').selectedOptions?.[0]?.textContent||sid;
-  if(!confirm(`Enviar "${name}" a ${ids.length} trato(s) y mover su próximo vencimiento a ${nextDue}?`))return;
+  const name=[tpl.metaTemplateName&&('Meta: '+tpl.metaTemplateName),tpl.twilioTemplateName&&('Twilio: '+tpl.twilioTemplateName)].filter(Boolean).join(' · ');
+  if(!confirm(`Enviar por la línea/proveedor de cada conversación a ${ids.length} trato(s) y mover su próximo vencimiento a ${nextDue}?\n\n${name}`))return;
   $('sendBtn').disabled=true;$('sendMsg').textContent='Enviando...';
   try{
-    const d=await api('/api/due-center/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dealIds:ids,contentSid:sid,nextDueDate:nextDue,campaignName:campaign})});
+    const d=await api('/api/due-center/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dealIds:ids,...tpl,nextDueDate:nextDue,campaignName:campaign})});
     $('sendMsg').className=d.errors?'dueNotice warn':'dueNotice ok';$('sendMsg').textContent=`Enviados: ${d.sent} · Errores: ${d.errors}`;
     S.selected.clear();await load();
   }catch(e){$('sendMsg').className='dueNotice error';$('sendMsg').textContent=e.message}

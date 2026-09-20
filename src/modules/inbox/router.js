@@ -106,18 +106,62 @@ async function resolveOutboundRoute(conversation={}){
   if(!from) return {from:"",provider:"twilio",gatewayLineId:"",gatewayTenantId:"",catalog:null,reads:0};
 
   let reads=0, catalog=null;
+
+  // A conversation created by MRAPI Gateway already knows its exact Gateway line.
+  // Prefer that immutable route before any legacy catalog/fallback logic.
+  if(String(conversation.provider||"").toLowerCase()==="meta" && String(conversation.gatewayLineId||"").trim()){
+    return {
+      from,
+      provider:"meta",
+      gatewayLineId:String(conversation.gatewayLineId),
+      gatewayTenantId:String(conversation.gatewayTenantId||config.gatewayTenantId||config.tenantId||""),
+      catalog:null,
+      reads
+    };
+  }
+
+  async function acceptCatalogSnapshot(snap){
+    reads += Number(snap?.size ?? 1);
+    const docs = snap?.docs || (snap?.exists ? [snap] : []);
+    const matches = docs.map(d=>d.data?d.data():{}).filter(d=>d && d.active!==false && String(d.provider||"").toLowerCase()==="meta" && String(d.gatewayLineId||"").trim());
+    if(matches.length===1){ catalog=matches[0]; return true; }
+    return false;
+  }
+
   try{
     const snap=await inboxDb.collection(LINE_CATALOG_COLLECTION).doc(lineDocId(from)).get();
     reads++;
-    if(snap.exists) catalog=snap.data()||{};
+    if(snap.exists){
+      const d=snap.data()||{};
+      if(d.active!==false && String(d.provider||"").toLowerCase()==="meta" && String(d.gatewayLineId||"").trim()) catalog=d;
+    }
+
+    // Self-heal legacy conversations created while this line was still on Twilio.
+    // They can have the correct visible label but no provider/gatewayLineId persisted.
+    if(!catalog && String(conversation.gatewayLineId||"").trim()){
+      const q=await inboxDb.collection(LINE_CATALOG_COLLECTION).where("gatewayLineId","==",String(conversation.gatewayLineId)).limit(2).get();
+      await acceptCatalogSnapshot(q);
+    }
+    if(!catalog && String(conversation.phoneNumberId||"").trim()){
+      const q=await inboxDb.collection(LINE_CATALOG_COLLECTION).where("phoneNumberId","==",String(conversation.phoneNumberId)).limit(2).get();
+      await acceptCatalogSnapshot(q);
+    }
+    if(!catalog && String(conversation.gatewayLineName||"").trim()){
+      const q=await inboxDb.collection(LINE_CATALOG_COLLECTION).where("gatewayLineName","==",String(conversation.gatewayLineName)).limit(2).get();
+      await acceptCatalogSnapshot(q);
+    }
+    if(!catalog && String(conversation.lineLabel||"").trim()){
+      const q=await inboxDb.collection(LINE_CATALOG_COLLECTION).where("label","==",String(conversation.lineLabel)).limit(2).get();
+      await acceptCatalogSnapshot(q);
+    }
   }catch(e){
     console.warn("resolve outbound line catalog",e.message||String(e));
   }
 
-  // Preferred line metadata from the shared line catalog is authoritative.
-  if(String(catalog?.provider||"").toLowerCase()==="meta" && String(catalog?.gatewayLineId||"").trim()){
+  if(catalog){
+    const resolvedFrom=normalizedLine(catalog.lineId||catalog.phone||from)||from;
     return {
-      from,
+      from:resolvedFrom,
       provider:"meta",
       gatewayLineId:String(catalog.gatewayLineId),
       gatewayTenantId:String(catalog.gatewayTenantId||conversation.gatewayTenantId||config.gatewayTenantId||config.tenantId||""),
@@ -126,20 +170,7 @@ async function resolveOutboundRoute(conversation={}){
     };
   }
 
-  // Fallback for conversations created by Gateway before the catalog entry was enriched.
-  const currentLine=normalizedLine(conversation.inboundTo||conversation.lineId||"");
-  if(digits(from)===digits(currentLine) && String(conversation.provider||"").toLowerCase()==="meta" && String(conversation.gatewayLineId||"").trim()){
-    return {
-      from,
-      provider:"meta",
-      gatewayLineId:String(conversation.gatewayLineId),
-      gatewayTenantId:String(conversation.gatewayTenantId||config.gatewayTenantId||config.tenantId||""),
-      catalog,
-      reads
-    };
-  }
-
-  return {from,provider:"twilio",gatewayLineId:"",gatewayTenantId:"",catalog,reads};
+  return {from,provider:"twilio",gatewayLineId:"",gatewayTenantId:"",catalog:null,reads};
 }
 
 function normalizedCustomerPhone(v){ return digits(v); }
@@ -801,7 +832,12 @@ router.get("/templates",authRequired,async(req,res)=>{
       const route=await resolveOutboundRoute(c.data);
       if(route.provider==="meta"){
         const templates=await wa.listGatewayTemplates({tenantId:route.gatewayTenantId,lineId:route.gatewayLineId});
-        return res.json({ok:true,templates,readsEstimate:1+route.reads,provider:"meta",lineId:route.from,gatewayLineId:route.gatewayLineId});
+        const repair={provider:"meta",gatewayLineId:route.gatewayLineId,gatewayTenantId:route.gatewayTenantId,inboundTo:route.from,lineId:route.from,updatedAt:FieldValue.serverTimestamp()};
+        if(route.catalog?.label) repair.lineLabel=cleanString(route.catalog.label,120);
+        if(route.catalog?.gatewayLineName) repair.gatewayLineName=cleanString(route.catalog.gatewayLineName,120);
+        if(route.catalog?.phoneNumberId) repair.phoneNumberId=cleanString(route.catalog.phoneNumberId,120);
+        await c.ref.set(repair,{merge:true});
+        return res.json({ok:true,templates,readsEstimate:1+route.reads,provider:"meta",lineId:route.from,gatewayLineId:route.gatewayLineId,lineLabel:repair.lineLabel||repair.gatewayLineName||""});
       }
     }
     const templates=await wa.listApprovedTemplates();

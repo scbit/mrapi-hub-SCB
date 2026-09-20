@@ -5,6 +5,7 @@ const config=require("../../core/config");
 const {inboxDb,admin}=require("../../core/google");
 const wa=require("./whatsapp");
 const dialogflow=require("./dialogflow");
+const {markRecontactResponse}=require("../crm/recovery-service");
 const router=express.Router();
 const FieldValue=admin.firestore.FieldValue;
 
@@ -175,9 +176,11 @@ router.post("/events",async(req,res)=>{
         if(lines.length>1&&siblings.size>1){const batch=inboxDb.batch();siblings.docs.forEach(d=>batch.set(d.ref,{duplicateConversationIds:ids.filter(x=>x!==d.id),linkedLineIds:lines,multiLineDetected:true,multiLineCount:lines.length,multiLineUpdatedAt:FieldValue.serverTimestamp()},{merge:true}));await batch.commit();}
       }catch(linkErr){console.warn("gateway multi-line auto-link",linkErr.message)}
     }
+    let campaignResponse={matched:0};
+    if(!duplicate) campaignResponse=await markRecontactResponse(from,sid,{provider:"meta",lineId:to});
     let botResult={skipped:true};
     if(!duplicate&&shouldBot) botResult=await processGatewayBotInbound({conversationId,convoRef,from:fromDigits,body,inboundSid:sid,event});
-    console.log(JSON.stringify({severity:"INFO",message:"Gateway inbound",conversationId,messageSid:sid,duplicate,from,to,gatewayLineId:event.lineId,tenantId:event.tenantId,profileName:!!profileName,referral:referral.has,shouldBot,botOk:botResult?.ok===true,botFallbackHuman:botResult?.fallbackHuman===true}));
+    console.log(JSON.stringify({severity:"INFO",message:"Gateway inbound",conversationId,messageSid:sid,duplicate,from,to,gatewayLineId:event.lineId,tenantId:event.tenantId,profileName:!!profileName,referral:referral.has,shouldBot,campaignResponses:Number(campaignResponse?.matched||0),botOk:botResult?.ok===true,botFallbackHuman:botResult?.fallbackHuman===true}));
     return res.json({ok:true,conversationId,messageSid:sid,duplicate});
   }catch(e){
     console.error("gateway-inbound",e);

@@ -5,6 +5,7 @@ const {authRequired}=require("../../middleware/auth");
 const {PIPELINE_STAGES,DEAL_TYPES,DEAL_TYPE_LABELS}=require("./constants");
 const {visibleOwners,canSeeOwner}=require("./access");
 const wa=require("../inbox/whatsapp");
+const {scheduledDate,processRecoveryEngine,RESPONSE_STAGE}=require("./recovery-service");
 const router=express.Router();
 router.use(authRequired);
 const FieldValue=admin.firestore.FieldValue;
@@ -47,6 +48,27 @@ function plusDaysISO(baseIso,days){
   return x.toISOString().slice(0,10);
 }
 function normalizeDate(v,fallbackDays=7){const s=clean(v,40);if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s;return plusDaysISO(isoDateBA(),fallbackDays)}
+
+function normalizeSequence(body={}){
+  const raw=Array.isArray(body.sequence)?body.sequence.slice(0,10):[];
+  const seq=raw.map((x,i)=>({
+    order:i+1,
+    dayOffset:Math.max(0,Math.min(365,Number(x?.dayOffset||0)||0)),
+    time:/^\d{2}:\d{2}$/.test(clean(x?.time,10))?clean(x.time,10):"10:00",
+    metaTemplateName:clean(x?.metaTemplateName,180),
+    metaTemplateLanguage:clean(x?.metaTemplateLanguage,40)||"es_AR",
+    twilioTemplateSid:clean(x?.twilioTemplateSid,120),
+    twilioTemplateName:clean(x?.twilioTemplateName,180)
+  })).filter(x=>x.metaTemplateName||x.twilioTemplateSid);
+  if(seq.length)return seq;
+  const fallback={
+    order:1,dayOffset:0,time:"10:00",
+    metaTemplateName:clean(body.metaTemplateName,180),metaTemplateLanguage:clean(body.metaTemplateLanguage,40)||"es_AR",
+    twilioTemplateSid:clean(body.twilioTemplateSid||body.contentSid,120),twilioTemplateName:clean(body.twilioTemplateName,180)
+  };
+  return fallback.metaTemplateName||fallback.twilioTemplateSid?[fallback]:[];
+}
+
 function modeBounds(mode){
   const today=isoDateBA();
   if(mode==="hoy")return {from:today,to:today};
@@ -296,6 +318,11 @@ router.post("/send",async(req,res)=>{
 });
 
 
+router.post("/engine/run",async(req,res)=>{
+  try{const maxMessages=Math.max(1,Math.min(50,Number(req.body?.maxMessages||20)||20));const out=await processRecoveryEngine({maxMessages});return res.json(out);}
+  catch(e){console.error("recovery engine manual",e);return res.status(500).json({ok:false,error:e.message});}
+});
+
 router.get("/campaigns",async(req,res)=>{
   try{
     const snap=await crmDb.collection(CAMPAIGNS).orderBy("createdAt","desc").limit(40).get();
@@ -318,9 +345,13 @@ router.post("/campaigns",async(req,res)=>{
     const movePipeline=Boolean(req.body?.movePipeline);
     const targetPipeline=["COMERCIAL","RECONTACTO"].includes(clean(req.body?.targetPipeline,40).toUpperCase())?clean(req.body?.targetPipeline,40).toUpperCase():"RECONTACTO";
     const targetOwner=clean(req.body?.targetOwner,220).toLowerCase();
+    const sequence=normalizeSequence(req.body||{});
+    const startDate=/^\d{4}-\d{2}-\d{2}$/.test(clean(req.body?.startDate,20))?clean(req.body.startDate,20):isoDateBA();
+    const interRecipientDelayMs=Math.max(500,Math.min(60000,Number(req.body?.interRecipientDelayMs||3000)||3000));
+    const autoEngine=req.body?.autoEngine!==false;
 
     if(!ids.length)return res.status(400).json({ok:false,error:"Seleccioná al menos un trato"});
-    if(!twilioTemplateSid&&!metaTemplateName)return res.status(400).json({ok:false,error:"Seleccioná al menos una plantilla (Meta o Twilio)"});
+    if(!sequence.length)return res.status(400).json({ok:false,error:"Configurá al menos un mensaje en la secuencia"});
     if(targetOwner && !(await canSeeOwner(req.authUser,targetOwner)))return res.status(403).json({ok:false,error:"No podés asignar ese owner"});
 
     let twilioTemplateName=twilioTemplateSid;
@@ -385,6 +416,8 @@ router.post("/campaigns",async(req,res)=>{
         phone:digits(phone),
         status,
         templateSid:twilioTemplateSid,templateName,twilioTemplateSid,twilioTemplateName,metaTemplateName,metaTemplateLanguage,nextDueDate,
+        nextStepIndex:0,stepsSent:0,errorCount:0,sequenceStopped:false,
+        nextSendAt:phone?admin.firestore.Timestamp.fromDate(scheduledDate(startDate,sequence[0])):null,
         createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()
       });
       added++;
@@ -392,6 +425,7 @@ router.post("/campaigns",async(req,res)=>{
 
     batch.set(ref,{
       name,type:"recontact",status:"ACTIVE",templateSid:twilioTemplateSid,templateName,twilioTemplateSid,twilioTemplateName,metaTemplateName,metaTemplateLanguage,nextDueDate,
+      autoEngine,sequence,startDate,interRecipientDelayMs,responseStage:RESPONSE_STAGE,stopOnResponse:true,continueOnError:true,
       total:added,pending:Math.max(0,added-blocked),sent:0,responded:0,errors:0,excluded:blocked,
       movePipeline,targetPipeline:movePipeline?targetPipeline:"",targetOwner:targetOwner||"",
       movedDeals:moved,reassignedDeals:reassigned,
@@ -401,9 +435,14 @@ router.post("/campaigns",async(req,res)=>{
     });
 
     await batch.commit();
+    for(const dealDoc of docs){
+      if(!dealDoc.exists)continue;const x=dealDoc.data()||{};let contact={};
+      if(x.contactId){const c=await crmDb.collection("contacts").doc(String(x.contactId)).get();if(c.exists)contact=c.data()||{};}
+      const phone=waPhone(contact.phone||x.contactPhone||"");if(phone)await addPhoneWatch(phone,ref.id,dealDoc.id).catch(()=>{});
+    }
 
     return res.json({
-      ok:true,id:ref.id,total:added,excluded:blocked,moved,reassigned,
+      ok:true,id:ref.id,total:added,excluded:blocked,moved,reassigned,autoEngine,sequenceSteps:sequence.length,startDate,interRecipientDelayMs,responseStage:RESPONSE_STAGE,
       movePipeline,targetPipeline,targetOwner,writesEstimate:added+1+moved+reassigned
     });
   }catch(e){console.error("campaign create",e);return res.status(500).json({ok:false,error:e.message})}
@@ -411,11 +450,12 @@ router.post("/campaigns",async(req,res)=>{
 
 router.get("/campaigns/:id/members",async(req,res)=>{
   try{
-    const status=clean(req.query.status,30).toUpperCase();let q=crmDb.collection(CAMPAIGNS).doc(req.params.id).collection("members");
-    if(status==="SIN_RESPUESTA")q=q.where("status","in",["SENT","NO_RESPONSE"]);
-    else if(status)q=q.where("status","==",status);
+    const status=clean(req.query.status,30).toUpperCase();const q=crmDb.collection(CAMPAIGNS).doc(req.params.id).collection("members");
     const snap=await q.limit(250).get();
-    const items=snap.docs.map(d=>({id:d.id,...d.data(),createdAt:d.data()?.createdAt?.toDate?.()?.toISOString?.()||null,respondedAt:d.data()?.respondedAt?.toDate?.()?.toISOString?.()||null}));
+    let docs=snap.docs;
+    if(status==="SIN_RESPUESTA")docs=docs.filter(d=>!["RESPONDED","EXCLUDED","CANCELLED"].includes(String((d.data()||{}).status||"").toUpperCase()));
+    else if(status)docs=docs.filter(d=>String((d.data()||{}).status||"").toUpperCase()===status);
+    const items=docs.map(d=>({id:d.id,...d.data(),createdAt:d.data()?.createdAt?.toDate?.()?.toISOString?.()||null,respondedAt:d.data()?.respondedAt?.toDate?.()?.toISOString?.()||null,nextSendAt:d.data()?.nextSendAt?.toDate?.()?.toISOString?.()||null,lastSentAt:d.data()?.lastSentAt?.toDate?.()?.toISOString?.()||null}));
     return res.json({ok:true,items,readsEstimate:snap.size});
   }catch(e){return res.status(500).json({ok:false,error:e.message})}
 });
@@ -470,16 +510,20 @@ router.patch("/campaigns/:id",async(req,res)=>{
     let twilioTemplateName=clean(req.body?.twilioTemplateName,180)||old.twilioTemplateName||twilioTemplateSid;
     const metaTemplateName=clean(req.body?.metaTemplateName,180)||old.metaTemplateName||"";
     const metaTemplateLanguage=clean(req.body?.metaTemplateLanguage,40)||old.metaTemplateLanguage||"es_AR";
+    const sequence=Array.isArray(req.body?.sequence)?normalizeSequence(req.body||{}):(Array.isArray(old.sequence)&&old.sequence.length?old.sequence:normalizeSequence({...old,metaTemplateName,metaTemplateLanguage,twilioTemplateSid,twilioTemplateName}));
+    const startDate=/^\d{4}-\d{2}-\d{2}$/.test(clean(req.body?.startDate,20))?clean(req.body.startDate,20):(old.startDate||isoDateBA());
+    const interRecipientDelayMs=Math.max(500,Math.min(60000,Number(req.body?.interRecipientDelayMs??old.interRecipientDelayMs??3000)||3000));
     if(twilioTemplateSid && twilioTemplateSid!==(old.twilioTemplateSid||old.templateSid)){try{const ts=await wa.listApprovedTemplates();const t=ts.find(x=>x.sid===twilioTemplateSid);if(t)twilioTemplateName=t.name||twilioTemplateSid}catch{}}
     const templateName=metaTemplateName&&twilioTemplateName?`Meta: ${metaTemplateName} · Twilio: ${twilioTemplateName}`:(metaTemplateName||twilioTemplateName);
-    await ref.set({name,nextDueDate,templateSid:twilioTemplateSid,templateName,twilioTemplateSid,twilioTemplateName,metaTemplateName,metaTemplateLanguage,updatedAt:FieldValue.serverTimestamp()},{merge:true});
-    const pending=await ref.collection("members").where("status","==","PENDING").limit(250).get();
-    if(!pending.empty){
+    await ref.set({name,nextDueDate,templateSid:twilioTemplateSid,templateName,twilioTemplateSid,twilioTemplateName,metaTemplateName,metaTemplateLanguage,sequence,startDate,interRecipientDelayMs,autoEngine:true,responseStage:RESPONSE_STAGE,stopOnResponse:true,continueOnError:true,updatedAt:FieldValue.serverTimestamp()},{merge:true});
+    const members=await ref.collection("members").limit(250).get();
+    const active=members.docs.filter(d=>["PENDING","WAITING"].includes(String((d.data()||{}).status||"").toUpperCase()));
+    if(active.length){
       const batch=crmDb.batch();
-      pending.docs.forEach(d=>batch.set(d.ref,{templateSid:twilioTemplateSid,templateName,twilioTemplateSid,twilioTemplateName,metaTemplateName,metaTemplateLanguage,nextDueDate,updatedAt:FieldValue.serverTimestamp()},{merge:true}));
+      active.forEach(d=>{const x=d.data()||{},idx=Math.max(0,Math.min(sequence.length-1,Number(x.nextStepIndex||0)||0));batch.set(d.ref,{templateSid:twilioTemplateSid,templateName,twilioTemplateSid,twilioTemplateName,metaTemplateName,metaTemplateLanguage,nextDueDate,nextSendAt:sequence[idx]?admin.firestore.Timestamp.fromDate(scheduledDate(startDate,sequence[idx])):null,updatedAt:FieldValue.serverTimestamp()},{merge:true});});
       await batch.commit();
     }
-    return res.json({ok:true,id:ref.id,name,nextDueDate,templateSid:twilioTemplateSid,templateName,twilioTemplateSid,twilioTemplateName,metaTemplateName,metaTemplateLanguage,writesEstimate:1+pending.size});
+    return res.json({ok:true,id:ref.id,name,nextDueDate,sequence,startDate,interRecipientDelayMs,responseStage:RESPONSE_STAGE,writesEstimate:1+active.length});
   }catch(e){console.error("campaign update",e);return res.status(500).json({ok:false,error:e.message})}
 });
 
@@ -509,6 +553,7 @@ router.post("/campaigns/:id/members",async(req,res)=>{
         dealId:d.id,contactId:String(x.contactId||""),contactName:String(x.contactName||contact.name||x.title||""),
         owner:String(x.owner||"").toLowerCase(),stage:String(x.stage||""),phone:digits(phone),status,
         templateSid:c.twilioTemplateSid||c.templateSid||"",templateName:c.templateName||"",twilioTemplateSid:c.twilioTemplateSid||c.templateSid||"",twilioTemplateName:c.twilioTemplateName||"",metaTemplateName:c.metaTemplateName||"",metaTemplateLanguage:c.metaTemplateLanguage||"es_AR",nextDueDate:c.nextDueDate||"",
+        nextStepIndex:0,stepsSent:0,errorCount:0,sequenceStopped:false,nextSendAt:phone&&Array.isArray(c.sequence)&&c.sequence[0]?admin.firestore.Timestamp.fromDate(scheduledDate(c.startDate||isoDateBA(),c.sequence[0])):null,
         createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()
       });
       added++;
@@ -518,6 +563,7 @@ router.post("/campaigns/:id/members",async(req,res)=>{
       ownerScope:[...owners].filter(Boolean),updatedAt:FieldValue.serverTimestamp()
     },{merge:true});
     await batch.commit();
+    for(const d of docs){if(!d.exists)continue;const x=d.data()||{};let contact={};if(x.contactId){const cx=await crmDb.collection("contacts").doc(String(x.contactId)).get();if(cx.exists)contact=cx.data()||{};}const phone=waPhone(contact.phone||x.contactPhone||"");if(phone)await addPhoneWatch(phone,ref.id,d.id).catch(()=>{});}
     return res.json({ok:true,added,pending,excluded,totalBefore:existing.size,writesEstimate:added+1});
   }catch(e){console.error("campaign add members",e);return res.status(500).json({ok:false,error:e.message})}
 });

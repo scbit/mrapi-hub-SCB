@@ -1,6 +1,6 @@
 (()=>{'use strict';
 const TK='mrapi_hub_token',UK='mrapi_hub_user';
-const S={token:localStorage.getItem(TK)||'',user:null,meta:null,templates:[],twilioTemplates:[],metaTemplates:[],rows:[],groups:{},campaigns:[],selected:new Set(),reads:0,mode:'vencidos'};
+const S={token:localStorage.getItem(TK)||'',user:null,meta:null,templates:[],twilioTemplates:[],metaTemplates:[],rows:[],groups:{},campaigns:[],selected:new Set(),reads:0,mode:'vencidos',sequence:[{dayOffset:0,time:'10:00',metaTemplateName:'',metaTemplateLanguage:'es_AR',twilioTemplateSid:'',twilioTemplateName:''}]};
 try{S.user=JSON.parse(localStorage.getItem(UK)||'null')}catch{}
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
@@ -15,7 +15,7 @@ function shell(){
   document.body.innerHTML=`<div class="dueShell">
   <header class="dueTop"><a class="dueBrand" href="/"><img src="/assets/tenant-logo"><div><b>MR API HUB</b><small>${esc(window.MRAPI_TENANT?.shortName||'MRAPI')}</small></div></a>
     <nav><a href="/inbox">▣ Bandeja</a><a class="active" href="/crm">▦ CRM</a><a href="/">◇ HUB</a></nav>
-    <span class="spacer"></span><span class="version-pill">v1.5.50</span><span class="who">${esc(S.user?.name||S.user?.email||'')}</span>
+    <span class="spacer"></span><span class="version-pill">v1.5.51</span><span class="who">${esc(S.user?.name||S.user?.email||'')}</span>
   </header>
   <main class="dueMain">
     <div class="dueHead"><div><h1>Centro de Recontacto</h1><p>Campañas de recontacto, vencidos y seguimiento comercial.</p></div><span class="spacer"></span><a class="btn secondary" href="/agenda">Agenda</a></div>
@@ -50,6 +50,11 @@ function shell(){
         <label>Pipeline destino<select id="targetPipeline"><option value="RECONTACTO">Recontacto</option><option value="COMERCIAL">Comercial</option></select></label>
         <label>Owner de los tratos<select id="targetOwner"><option value="">Conservar owner actual</option></select></label>
       </div>
+      <section class="sequenceBuilder">
+        <div class="sequenceHead"><div><b>Secuencia automática de Recovery</b><small>Podés configurar de 1 a 10 mensajes. Se detiene apenas el cliente responde y pasa a RESPONDIO RECOVERY.</small></div><button class="miniBtn" id="addSequenceStep" type="button">+ Agregar mensaje</button></div>
+        <div class="sequenceConfig"><label>Fecha de inicio<input type="date" id="sequenceStartDate"></label><label>Delay entre clientes (segundos)<input type="number" min="1" max="60" value="3" id="sequenceDelay"></label><span>Proveedor: automático según la línea (Twilio o Meta Cloud API).</span></div>
+        <div id="sequenceBox"></div>
+      </section>
       <div class="sendHint" id="templateHint">Podés configurar Meta Cloud API y Twilio al mismo tiempo. Cada trato se envía por el proveedor de su línea actual.</div>
       <div id="sendMsg"></div>
     </section>
@@ -67,7 +72,7 @@ function shell(){
   ['stage','owner','dtype','sendState','limit'].forEach(id=>$(id).onchange=load);
   let tm;$('q').oninput=()=>{clearTimeout(tm);tm=setTimeout(load,350)};
   $('reload').onclick=load;$('clearSel').onclick=()=>{S.selected.clear();renderGroups();updateSelection()};
-  $('sendBtn').onclick=sendSelected;$('createCampaignBtn').onclick=createCampaign;$('refreshCampaigns').onclick=loadCampaigns;$('modalClose').onclick=closeModal;$('modalBack').onclick=e=>{if(e.target===$('modalBack'))closeModal()};
+  $('sendBtn').onclick=sendSelected;$('createCampaignBtn').onclick=createCampaign;$('refreshCampaigns').onclick=loadCampaigns;$('addSequenceStep').onclick=addSequenceStep;$('modalClose').onclick=closeModal;$('modalBack').onclick=e=>{if(e.target===$('modalBack'))closeModal()};
 }
 function updateReads(){if($('reads'))$('reads').textContent=`Reads aprox. sesión: ${S.reads}`}
 function notice(msg,type=''){const el=$('notice');if(!el)return;el.className=msg?`dueNotice ${type}`:'';el.textContent=msg||''}
@@ -78,7 +83,7 @@ function fillMeta(){
   for(const o of S.meta.owners||[])$('targetOwner').insertAdjacentHTML('beforeend',`<option value="${esc(o.email)}">${esc(o.name||o.email)}</option>`);
   $('targetPipeline').disabled=!$('movePipeline').checked;
   $('movePipeline').onchange=()=>{$('targetPipeline').disabled=!$('movePipeline').checked};
-  $('nextDue').value=plusDays(S.meta.today||new Date().toISOString().slice(0,10),7);
+  $('nextDue').value=plusDays(S.meta.today||new Date().toISOString().slice(0,10),7);$('sequenceStartDate').value=S.meta.today||new Date().toISOString().slice(0,10);
 }
 function plusDays(iso,n){const [y,m,d]=String(iso).split('-').map(Number);const x=new Date(Date.UTC(y,m-1,d+n));return x.toISOString().slice(0,10)}
 async function loadTemplates(){
@@ -86,12 +91,43 @@ async function loadTemplates(){
     const d=await api('/api/due-center/templates');S.twilioTemplates=d.twilio||[];S.metaTemplates=d.meta||[];S.templates=[...S.metaTemplates,...S.twilioTemplates];
     $('metaTemplate').innerHTML='<option value="">No usar / seleccionar...</option>'+S.metaTemplates.map(t=>`<option value="${esc(t.name)}" data-language="${esc(t.language||'es_AR')}">${esc(t.name)}${t.language?' · '+esc(t.language):''}${t.category?' · '+esc(t.category):''}</option>`).join('');
     $('twilioTemplate').innerHTML='<option value="">No usar / seleccionar...</option>'+S.twilioTemplates.map(t=>`<option value="${esc(t.sid)}">${esc(t.name)}${t.language?' · '+esc(t.language):''}${t.category?' · '+esc(t.category):''}</option>`).join('');
-    $('templateHint').textContent=`Meta: ${S.metaTemplates.length} plantilla(s) · Twilio: ${S.twilioTemplates.length} plantilla(s). El sistema elige según la línea de cada conversación.`;
+    $('templateHint').textContent=`Meta: ${S.metaTemplates.length} plantilla(s) · Twilio: ${S.twilioTemplates.length} plantilla(s). El sistema elige según la línea de cada conversación.`;renderSequence();
   }catch(e){$('templateHint').textContent='No se pudieron cargar plantillas: '+e.message}
 }
 function selectedTemplatePayload(){
   const meta=$('metaTemplate');const tw=$('twilioTemplate');
   return {metaTemplateName:meta?.value||'',metaTemplateLanguage:meta?.selectedOptions?.[0]?.dataset?.language||'es_AR',twilioTemplateSid:tw?.value||'',twilioTemplateName:tw?.selectedOptions?.[0]?.textContent||''};
+}
+function sequenceMetaOptions(selected=''){
+  return '<option value="">No usar</option>'+S.metaTemplates.map(t=>`<option value="${esc(t.name)}" data-language="${esc(t.language||'es_AR')}" ${t.name===selected?'selected':''}>${esc(t.name)}${t.language?' · '+esc(t.language):''}</option>`).join('');
+}
+function sequenceTwilioOptions(selected=''){
+  return '<option value="">No usar</option>'+S.twilioTemplates.map(t=>`<option value="${esc(t.sid)}" ${t.sid===selected?'selected':''}>${esc(t.name)}${t.language?' · '+esc(t.language):''}</option>`).join('');
+}
+function renderSequence(){
+  const box=$('sequenceBox');if(!box)return;
+  box.innerHTML=S.sequence.map((x,i)=>`<div class="sequenceRow" data-seq-row="${i}">
+    <div class="sequenceNum"><b>Mensaje ${i+1}</b><small>${i===0?'Primer contacto':'Seguimiento'}</small></div>
+    <label>Día desde inicio<input type="number" min="0" max="365" value="${Number(x.dayOffset||0)}" data-seq-day="${i}"></label>
+    <label>Horario<input type="time" value="${esc(x.time||'10:00')}" data-seq-time="${i}"></label>
+    <label>Meta Cloud API<select data-seq-meta="${i}">${sequenceMetaOptions(x.metaTemplateName||'')}</select></label>
+    <label>Twilio<select data-seq-twilio="${i}">${sequenceTwilioOptions(x.twilioTemplateSid||'')}</select></label>
+    <button class="miniBtn remove" type="button" data-seq-remove="${i}" ${S.sequence.length===1?'disabled':''}>Quitar</button>
+  </div>`).join('');
+  box.querySelectorAll('[data-seq-day]').forEach(el=>el.onchange=()=>{S.sequence[Number(el.dataset.seqDay)].dayOffset=Math.max(0,Number(el.value||0)||0)});
+  box.querySelectorAll('[data-seq-time]').forEach(el=>el.onchange=()=>{S.sequence[Number(el.dataset.seqTime)].time=el.value||'10:00'});
+  box.querySelectorAll('[data-seq-meta]').forEach(el=>el.onchange=()=>{const i=Number(el.dataset.seqMeta);S.sequence[i].metaTemplateName=el.value;S.sequence[i].metaTemplateLanguage=el.selectedOptions?.[0]?.dataset?.language||'es_AR'});
+  box.querySelectorAll('[data-seq-twilio]').forEach(el=>el.onchange=()=>{const i=Number(el.dataset.seqTwilio);S.sequence[i].twilioTemplateSid=el.value;S.sequence[i].twilioTemplateName=el.selectedOptions?.[0]?.textContent||''});
+  box.querySelectorAll('[data-seq-remove]').forEach(el=>el.onclick=()=>{if(S.sequence.length<=1)return;S.sequence.splice(Number(el.dataset.seqRemove),1);renderSequence()});
+}
+function addSequenceStep(){
+  if(S.sequence.length>=10)return notice('La secuencia admite hasta 10 mensajes.','error');
+  const prev=S.sequence[S.sequence.length-1]||{};
+  S.sequence.push({dayOffset:Number(prev.dayOffset||0)+2,time:prev.time||'10:00',metaTemplateName:prev.metaTemplateName||'',metaTemplateLanguage:prev.metaTemplateLanguage||'es_AR',twilioTemplateSid:prev.twilioTemplateSid||'',twilioTemplateName:prev.twilioTemplateName||''});
+  renderSequence();
+}
+function collectSequence(){
+  return S.sequence.map((x,i)=>({order:i+1,dayOffset:Math.max(0,Number(x.dayOffset||0)||0),time:x.time||'10:00',metaTemplateName:x.metaTemplateName||'',metaTemplateLanguage:x.metaTemplateLanguage||'es_AR',twilioTemplateSid:x.twilioTemplateSid||'',twilioTemplateName:x.twilioTemplateName||''}));
 }
 function query(){
   const p=new URLSearchParams({mode:S.mode,limit:$('limit').value||'100'});
@@ -138,11 +174,11 @@ async function loadCampaigns(){
     const d=await api('/api/due-center/campaigns');S.campaigns=d.items||[];renderCampaigns();
   }catch(e){$('campaignsBox').innerHTML=`<div class="dueNotice error">${esc(e.message)}</div>`}
 }
-function campaignNoResponse(c){return Math.max(0,Number(c.sent||0)-Number(c.responded||0))}
+function campaignNoResponse(c){return Math.max(0,Number(c.total||0)-Number(c.responded||0)-Number(c.excluded||0))}
 function renderCampaigns(){
   if(!S.campaigns.length){$('campaignsBox').innerHTML='<div class="dueCard empty">Todavía no hay campañas creadas.</div>';return}
   $('campaignsBox').innerHTML=S.campaigns.map(c=>`<article class="campaignCard">
-    <div class="campaignTop"><div><small>CAMPAÑA ${Number(c.generation||0)>0?'· RECONTACTO '+Number(c.generation):''}</small><h3>${esc(c.name||'Sin nombre')}</h3><span>${c.templateName?esc(c.templateName):''}${c.nextDueDate?' · próximo '+esc(c.nextDueDate):''}</span></div><span class="campaignStatus">${esc(c.status||'ACTIVE')}</span></div>
+    <div class="campaignTop"><div><small>${c.autoEngine?'AUTOMÁTICA · ':''}CAMPAÑA ${Number(c.generation||0)>0?'· RECONTACTO '+Number(c.generation):''}</small><h3>${esc(c.name||'Sin nombre')}</h3><span>${c.autoEngine?`${Number(c.sequence?.length||0)} mensaje(s) · ${Math.round(Number(c.interRecipientDelayMs||3000)/1000)}s entre clientes · responde → RESPONDIO RECOVERY`:(c.templateName?esc(c.templateName):'')}${c.nextDueDate?' · próximo '+esc(c.nextDueDate):''}</span></div><span class="campaignStatus">${esc(c.status||'ACTIVE')}</span></div>
     <div class="campaignMetrics">
       <button data-cmembers="${esc(c.id)}" data-status=""><small>Todos</small><b>${Number(c.total||0)}</b></button>
       <button data-cmembers="${esc(c.id)}" data-status="RESPONDED" class="good"><small>Respondieron</small><b>${Number(c.responded||0)}</b></button>
@@ -152,13 +188,14 @@ function renderCampaigns(){
     </div>
     <div class="campaignActions">
       <button class="miniBtn primaryManage" data-cmanage="${esc(c.id)}">Gestionar campaña</button>
-      <button class="miniBtn" data-csend="${esc(c.id)}">Enviar próximos 30 pendientes</button>
+      ${c.autoEngine?`<button class="miniBtn" data-crun="${esc(c.id)}">Procesar motor ahora</button>`:`<button class="miniBtn" data-csend="${esc(c.id)}">Enviar próximos 30 pendientes</button>`}
       <button class="miniBtn" data-csub="${esc(c.id)}" ${campaignNoResponse(c)?'':'disabled'}>Crear subcampaña sin respuesta</button>
     </div>
   </article>`).join('');
   document.querySelectorAll('[data-cmembers]').forEach(b=>b.onclick=()=>openCampaignManager(b.dataset.cmembers,b.dataset.status||''));
   document.querySelectorAll('[data-cmanage]').forEach(b=>b.onclick=()=>openCampaignManager(b.dataset.cmanage,''));
   document.querySelectorAll('[data-csend]').forEach(b=>b.onclick=()=>sendCampaignBatch(b.dataset.csend));
+  document.querySelectorAll('[data-crun]').forEach(b=>b.onclick=()=>runRecoveryEngine());
   document.querySelectorAll('[data-csub]').forEach(b=>b.onclick=()=>createSubcampaign(b.dataset.csub));
 }
 async function createCampaign(){
@@ -169,33 +206,42 @@ async function createCampaign(){
   const movePipeline=$('movePipeline').checked;
   const targetPipeline=$('targetPipeline').value||'RECONTACTO';
   const targetOwner=$('targetOwner').value||'';
+  const sequence=collectSequence();
+  const startDate=$('sequenceStartDate').value||S.meta?.today;
+  const interRecipientDelayMs=Math.max(1000,Math.min(60000,Number($('sequenceDelay').value||3)*1000));
 
   if(!ids.length)return notice('Seleccioná contactos para crear la campaña.','error');
   if(ids.length>200)return notice('La campaña admite hasta 200 contactos por cohorte.','error');
-  if(!tpl.metaTemplateName&&!tpl.twilioTemplateSid)return notice('Seleccioná al menos una plantilla Meta o Twilio.','error');
+  if(!sequence.length||sequence.some(x=>!x.metaTemplateName&&!x.twilioTemplateSid))return notice('Cada mensaje de la secuencia necesita al menos una plantilla Meta o Twilio.','error');
 
   const campaignName=name||`Recontacto ${new Date().toLocaleDateString('es-AR')}`;
+  const incompleteProvider=sequence.some(x=>!x.metaTemplateName||!x.twilioTemplateSid);
   const changes=[
+    `${sequence.length} mensaje(s) automáticos`,
+    `delay ${Math.round(interRecipientDelayMs/1000)}s entre clientes`,
     movePipeline?`mover los mismos ${ids.length} trato(s) a pipeline ${targetPipeline}`:'mantener pipeline actual',
-    targetOwner?`asignar owner ${targetOwner}`:'conservar owners actuales'
+    targetOwner?`asignar owner ${targetOwner}`:'conservar owner asignado'
   ].join(' · ');
-
-  if(!confirm(`Crear campaña "${campaignName}" con ${ids.length} contacto(s)?\n\n${changes}`))return;
+  const warning=incompleteProvider?'\n\nOjo: algún paso no tiene las dos plantillas. Si ese cliente usa el proveedor faltante, ese intento dará error pero el motor seguirá.':'';
+  if(!confirm(`Crear campaña automática "${campaignName}" con ${ids.length} contacto(s)?\n\n${changes}${warning}`))return;
 
   $('createCampaignBtn').disabled=true;
   try{
     const d=await api('/api/due-center/campaigns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-      dealIds:ids,name:campaignName,...tpl,nextDueDate,movePipeline,targetPipeline,targetOwner
+      dealIds:ids,name:campaignName,...tpl,nextDueDate,movePipeline,targetPipeline,targetOwner,sequence,startDate,interRecipientDelayMs,autoEngine:true
     })});
-
-    let msg=`Campaña creada con ${d.total} contacto(s).`;
+    let msg=`Campaña creada con ${d.total} contacto(s) y ${d.sequenceSteps} mensaje(s). Motor automático activo.`;
     if(d.moved)msg+=` ${d.moved} trato(s) movidos a pipeline ${d.targetPipeline}.`;
     if(d.reassigned)msg+=` ${d.reassigned} trato(s) cambiaron de owner.`;
-    msg+=' Ahora podés enviar los pendientes.';
+    msg+=' Si responden, salen de la secuencia y pasan a RESPONDIO RECOVERY.';
     notice(msg,'ok');
-
     S.selected.clear();renderGroups();updateSelection();await Promise.all([loadCampaigns(),load()]);
   }catch(e){notice(e.message,'error')}finally{$('createCampaignBtn').disabled=false}
+}
+async function runRecoveryEngine(){
+  if(!confirm('Procesar ahora los mensajes de Recovery que ya estén vencidos por fecha y hora?'))return;
+  try{const d=await api('/api/due-center/engine/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({maxMessages:20})});notice(`Motor Recovery: ${d.sent} enviados · ${d.errors} errores · ${d.processed} procesados.`,d.errors?'warn':'ok');await loadCampaigns();}
+  catch(e){notice(e.message,'error')}
 }
 async function sendCampaignBatch(id){
   if(!confirm('Enviar ahora hasta 30 pendientes de esta campaña?'))return;
@@ -220,6 +266,7 @@ async function createSubcampaign(id){
 }
 async function openCampaignManager(id,status=''){
   const c=S.campaigns.find(x=>x.id===id);if(!c)return;
+  S.editSequence=(Array.isArray(c.sequence)&&c.sequence.length?c.sequence:[{dayOffset:0,time:'10:00',metaTemplateName:c.metaTemplateName||'',metaTemplateLanguage:c.metaTemplateLanguage||'es_AR',twilioTemplateSid:c.twilioTemplateSid||c.templateSid||'',twilioTemplateName:c.twilioTemplateName||''}]).map(x=>({...x}));
   $('modalBack').classList.add('open');
   $('modalTitle').textContent='Gestionar campaña';
   const metaOpts=S.metaTemplates.map(t=>`<option value="${esc(t.name)}" data-language="${esc(t.language||'es_AR')}" ${t.name===c.metaTemplateName?'selected':''}>${esc(t.name)}${t.language?' · '+esc(t.language):''}</option>`).join('');
@@ -231,8 +278,11 @@ async function openCampaignManager(id,status=''){
         <label>Plantilla Meta<select id="cmMetaTemplate"><option value="">No usar</option>${metaOpts}</select></label>
         <label>Plantilla Twilio<select id="cmTwilioTemplate"><option value="">No usar</option>${twilioOpts}</select></label>
         <label>Próximo vencimiento<input id="cmDue" type="date" value="${esc(c.nextDueDate||'')}"></label>
+        <label>Inicio secuencia<input id="cmStartDate" type="date" value="${esc(c.startDate||S.meta?.today||'')}"></label>
+        <label>Delay entre clientes (seg)<input id="cmDelay" type="number" min="1" max="60" value="${Math.round(Number(c.interRecipientDelayMs||3000)/1000)}"></label>
         <button class="btn" id="cmSave">Guardar cambios</button>
       </div>
+      <div class="managerSequence"><div class="sequenceHead"><div><b>Mensajes automáticos</b><small>1 a 10 pasos. El motor sigue aunque un envío falle.</small></div><button class="miniBtn" id="cmAddStep" type="button">+ Mensaje</button></div><div id="cmSequenceBox"></div></div>
       <div class="campaignDangerRow">
         <div><b>${Number(c.total||0)} contactos</b><span> · ${Number(c.responded||0)} respondieron · ${campaignNoResponse(c)} sin respuesta</span></div>
         <button class="btn danger small" id="cmDelete">Eliminar campaña</button>
@@ -255,6 +305,8 @@ async function openCampaignManager(id,status=''){
   </div>`;
 
   $('cmSave').onclick=()=>saveCampaign(id);
+  $('cmAddStep').onclick=()=>{if(S.editSequence.length>=10)return alert('Máximo 10 mensajes');const p=S.editSequence[S.editSequence.length-1]||{};S.editSequence.push({dayOffset:Number(p.dayOffset||0)+2,time:p.time||'10:00',metaTemplateName:p.metaTemplateName||'',metaTemplateLanguage:p.metaTemplateLanguage||'es_AR',twilioTemplateSid:p.twilioTemplateSid||'',twilioTemplateName:p.twilioTemplateName||''});renderManagerSequence()};
+  renderManagerSequence();
   $('cmDelete').onclick=()=>deleteCampaign(id);
   $('cmAddSelected').onclick=()=>addSelectedToCampaign(id);
   document.querySelectorAll('[data-cmstatus]').forEach(b=>b.onclick=()=>{
@@ -262,6 +314,22 @@ async function openCampaignManager(id,status=''){
     loadCampaignMembersIntoManager(id,b.dataset.cmstatus||'');
   });
   await loadCampaignMembersIntoManager(id,status);
+}
+function renderManagerSequence(){
+  const box=$('cmSequenceBox');if(!box)return;
+  box.innerHTML=(S.editSequence||[]).map((x,i)=>`<div class="sequenceRow compact">
+    <div class="sequenceNum"><b>${i+1}</b></div>
+    <label>Día<input type="number" min="0" max="365" value="${Number(x.dayOffset||0)}" data-cm-day="${i}"></label>
+    <label>Hora<input type="time" value="${esc(x.time||'10:00')}" data-cm-time="${i}"></label>
+    <label>Meta<select data-cm-meta="${i}">${sequenceMetaOptions(x.metaTemplateName||'')}</select></label>
+    <label>Twilio<select data-cm-twilio="${i}">${sequenceTwilioOptions(x.twilioTemplateSid||'')}</select></label>
+    <button class="miniBtn remove" type="button" data-cm-remove="${i}" ${(S.editSequence||[]).length===1?'disabled':''}>Quitar</button>
+  </div>`).join('');
+  box.querySelectorAll('[data-cm-day]').forEach(el=>el.onchange=()=>S.editSequence[Number(el.dataset.cmDay)].dayOffset=Math.max(0,Number(el.value||0)||0));
+  box.querySelectorAll('[data-cm-time]').forEach(el=>el.onchange=()=>S.editSequence[Number(el.dataset.cmTime)].time=el.value||'10:00');
+  box.querySelectorAll('[data-cm-meta]').forEach(el=>el.onchange=()=>{const i=Number(el.dataset.cmMeta);S.editSequence[i].metaTemplateName=el.value;S.editSequence[i].metaTemplateLanguage=el.selectedOptions?.[0]?.dataset?.language||'es_AR'});
+  box.querySelectorAll('[data-cm-twilio]').forEach(el=>el.onchange=()=>{const i=Number(el.dataset.cmTwilio);S.editSequence[i].twilioTemplateSid=el.value;S.editSequence[i].twilioTemplateName=el.selectedOptions?.[0]?.textContent||''});
+  box.querySelectorAll('[data-cm-remove]').forEach(el=>el.onclick=()=>{if(S.editSequence.length<=1)return;S.editSequence.splice(Number(el.dataset.cmRemove),1);renderManagerSequence()});
 }
 async function loadCampaignMembersIntoManager(id,status=''){
   const box=$('cmMembers');if(!box)return;box.innerHTML='<div class="loading">Cargando contactos...</div>';
@@ -284,15 +352,19 @@ async function saveCampaign(id){
   const name=$('cmName').value.trim(),nextDueDate=$('cmDue').value;
   const metaEl=$('cmMetaTemplate'),twEl=$('cmTwilioTemplate');
   const metaTemplateName=metaEl.value,metaTemplateLanguage=metaEl.selectedOptions?.[0]?.dataset?.language||c.metaTemplateLanguage||'es_AR',twilioTemplateSid=twEl.value,twilioTemplateName=twEl.selectedOptions?.[0]?.textContent||c.twilioTemplateName||'';
-  const templateName=[metaTemplateName&&('Meta: '+metaTemplateName),twilioTemplateName&&('Twilio: '+twilioTemplateName)].filter(Boolean).join(' · ');
+  const sequence=(S.editSequence||[]).map((x,i)=>({order:i+1,dayOffset:Math.max(0,Number(x.dayOffset||0)||0),time:x.time||'10:00',metaTemplateName:x.metaTemplateName||'',metaTemplateLanguage:x.metaTemplateLanguage||'es_AR',twilioTemplateSid:x.twilioTemplateSid||'',twilioTemplateName:x.twilioTemplateName||''}));
   if(!name)return alert('Poné un nombre a la campaña');
+  if(!sequence.length||sequence.some(x=>!x.metaTemplateName&&!x.twilioTemplateSid))return alert('Cada mensaje necesita al menos una plantilla Meta o Twilio.');
+  const startDate=$('cmStartDate').value||c.startDate||S.meta?.today;
+  const interRecipientDelayMs=Math.max(1000,Math.min(60000,Number($('cmDelay').value||3)*1000));
   $('cmSave').disabled=true;
   try{
-    await api('/api/due-center/campaigns/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,...payloadTpl,templateName,nextDueDate})});
-    notice('Campaña actualizada.','ok');await loadCampaigns();
-    const fresh=S.campaigns.find(x=>x.id===id);if(fresh){Object.assign(c,fresh)}
+    await api('/api/due-center/campaigns/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,nextDueDate,metaTemplateName,metaTemplateLanguage,twilioTemplateSid,twilioTemplateName,sequence,startDate,interRecipientDelayMs})});
+    notice('Campaña y secuencia actualizadas.','ok');await loadCampaigns();
+    const fresh=S.campaigns.find(x=>x.id===id);if(fresh)Object.assign(c,fresh);
   }catch(e){alert(e.message)}finally{if($('cmSave'))$('cmSave').disabled=false}
 }
+
 async function deleteCampaign(id){
   const c=S.campaigns.find(x=>x.id===id);if(!c)return;
   if(!confirm(`Eliminar la campaña "${c.name}" y sus miembros?\n\nEsto NO elimina los tratos del CRM.`))return;

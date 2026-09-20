@@ -96,7 +96,7 @@ button,a,select,input,textarea{touch-action:manipulation}
 
 /* v1.5.38 — Mobile App mode: one screen at a time, no stacked desktop panes */
 @media(max-width:850px){
-  body{background:#fff;overflow:hidden!important}
+  body{background:#fff;overflow-x:hidden!important;overflow-y:auto!important;-webkit-overflow-scrolling:touch}
   .shell{height:100dvh!important;display:grid!important;grid-template-rows:auto minmax(0,1fr)!important;background:#fff}
   .scbTopbar{height:52px!important;min-height:52px!important;padding:env(safe-area-inset-top) 10px 0!important;border-bottom:1px solid #e8ecef;background:#fff!important;color:#111827!important}
   .scbTopbar .tenantBrand{color:#111827!important}.scbTopbar .tenantBrand img{width:34px!important;height:34px!important;object-fit:contain}.scbTopbar .tenantBrand b{font-size:14px!important}.scbTopbar .tenantBrand small{font-size:9px!important;color:#7b8490!important}
@@ -146,4 +146,18 @@ button,a,select,input,textarea{touch-action:manipulation}
 
 @media(max-width:390px){
   .chatActions{max-width:39vw!important}.chatActions #deskOpenBtn{display:none!important}.composerTools{grid-template-columns:auto auto minmax(0,1fr)!important}.composerTools #templateBtn{grid-column:1/-1;width:100%!important}.adContext{max-height:66px!important}
+}
+
+
+/* v1.5.50 — iOS/mobile scroll repair for CRM, Agenda and Hub.
+   Inbox keeps its own 100dvh app shell; the other modules must allow document scrolling. */
+@media(max-width:850px){
+  html{min-height:100%;height:auto!important;overflow-x:hidden;overflow-y:auto}
+  body{min-height:100%;height:auto!important;overflow-x:hidden!important;overflow-y:auto!important;overscroll-behavior-y:auto!important;-webkit-overflow-scrolling:touch}
+  body.hubHome{overflow-y:auto!important}
+  .crm-shell,.tools-shell,.dueShell{min-height:100dvh!important;height:auto!important;overflow:visible!important}
+  .crm-main,.tools-main,.dueMain,.hubMain{height:auto!important;min-height:0!important;overflow-y:visible!important;-webkit-overflow-scrolling:touch}
+  .agenda-grid{height:auto!important;overflow:visible!important}
+  /* Bandeja remains an app-like fixed viewport and scrolls only inside its own panes. */
+  .shell{height:100dvh!important;overflow:hidden!important}
 }

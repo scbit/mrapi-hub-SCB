@@ -9,3 +9,7 @@
 @media(max-width:1100px){.status-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.status-toolbar select#owner{min-width:240px}}
 @media(max-width:800px){.status-summary-grid{grid-template-columns:1fr 1fr}.status-table-wrap{max-height:none;overflow:visible}.status-table{min-width:0}.status-block{overflow:visible}.status-table tr{padding:10px}.status-table td{font-size:11px}.status-note{max-width:none;min-width:0}.status-inline{min-width:0}.status-actions{white-space:normal;flex-wrap:wrap}.status-actions .btn{flex:1 1 auto}.status-block-head{position:sticky;top:58px;z-index:7}.status-toolbar select#owner{min-width:0}.status-toolbar{grid-template-columns:1fr 1fr}.status-toolbar #owner{grid-column:span 2}.status-toolbar #reload{grid-column:span 1}.status-toolbar .reads{grid-column:span 2}}
 @media(max-width:520px){.status-summary-grid,.quality-grid{grid-template-columns:1fr 1fr}.status-card{padding:12px;min-height:88px}.status-card strong{font-size:22px}.status-block-head{align-items:flex-start}.status-block-head .btn{padding:7px 9px}.deal-main b{font-size:12px}.deal-main span,.deal-main small{font-size:10px}}
+
+/* v1.5.44 - Mi Publicidad */
+.btn.dark{background:#101828;color:#fff}.tools-head.compact{align-items:center;margin-bottom:12px}.tools-head.compact h2{margin:0;font-size:18px}.tools-head.compact p{margin-top:3px}
+@media(max-width:800px){.stats{grid-template-columns:repeat(2,1fr)}.stats .stat:last-child{grid-column:span 2}.quick-modules{overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px}.quick-modules a{white-space:nowrap}}

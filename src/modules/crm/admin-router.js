@@ -1,6 +1,6 @@
 "use strict";
 const express=require("express");
-const {admin,crmDb}=require("../../core/google");
+const {admin,crmDb,inboxDb}=require("../../core/google");
 const {authRequired}=require("../../middleware/auth");
 const {visibleOwners,isAdminLike,role}=require("./access");
 const {LEAD_QUALITY_VALUES}=require("./constants");
@@ -20,6 +20,25 @@ router.get("/users",async(req,res)=>{try{if(isAdminLike(req.authUser)){const u=a
 router.post("/users",async(req,res)=>{try{if(role(req.authUser)!=="admin")return res.status(403).json({ok:false,error:"Solo admin puede crear usuarios"});const name=String(req.body?.name||"").trim(),email=cleanOwner(req.body?.email),password=String(req.body?.password||""),r=normalizeRole(req.body?.role),teamLeaderId=String(req.body?.teamLeaderId||"").trim();if(!name||!email||!password)return res.status(400).json({ok:false,error:"Nombre, email y contraseña son obligatorios"});const exists=await crmDb.collection("users").where("email","==",email).limit(1).get();if(!exists.empty)return res.status(409).json({ok:false,error:"Ya existe un usuario con ese email",readsEstimate:exists.size});if(r==="field_sales"&&!teamLeaderId)return res.status(400).json({ok:false,error:"Field Sales requiere Team Leader"});if(teamLeaderId){const tl=await crmDb.collection("users").doc(teamLeaderId).get();if(!tl.exists||normalizeRole((tl.data()||{}).role)!=="team_leader")return res.status(400).json({ok:false,error:"Team Leader inválido",readsEstimate:1+exists.size});}const ref=crmDb.collection("users").doc();await ref.set({name,email,password,role:r,teamLeaderId:r==="field_sales"?teamLeaderId:"",createdAt:new Date(),updatedAt:new Date()});res.json({ok:true,id:ref.id,readsEstimate:exists.size+(teamLeaderId?1:0),writesEstimate:1});}catch(e){res.status(500).json({ok:false,error:e.message});}});
 router.put("/users/:id",async(req,res)=>{try{if(role(req.authUser)!=="admin")return res.status(403).json({ok:false,error:"Solo admin puede editar usuarios"});const ref=crmDb.collection("users").doc(req.params.id),snap=await ref.get();if(!snap.exists)return res.status(404).json({ok:false,error:"Usuario no encontrado"});const old=snap.data()||{},p={updatedAt:new Date()};if("name" in (req.body||{}))p.name=String(req.body.name||"").trim();if("email" in (req.body||{}))p.email=cleanOwner(req.body.email);if(req.body?.password)p.password=String(req.body.password);const r="role" in (req.body||{})?normalizeRole(req.body.role):normalizeRole(old.role);p.role=r;const teamLeaderId=String(req.body?.teamLeaderId??old.teamLeaderId??"").trim();if(r==="field_sales"&&!teamLeaderId)return res.status(400).json({ok:false,error:"Field Sales requiere Team Leader"});p.teamLeaderId=r==="field_sales"?teamLeaderId:"";if(p.teamLeaderId){const tl=await crmDb.collection("users").doc(p.teamLeaderId).get();if(!tl.exists||normalizeRole((tl.data()||{}).role)!=="team_leader")return res.status(400).json({ok:false,error:"Team Leader inválido"});}await ref.update(p);res.json({ok:true,readsEstimate:1+(p.teamLeaderId?1:0),writesEstimate:1});}catch(e){res.status(500).json({ok:false,error:e.message});}});
 router.delete("/users/:id",async(req,res)=>{try{if(role(req.authUser)!=="admin")return res.status(403).json({ok:false,error:"Solo admin puede borrar usuarios"});if(req.params.id===req.authUser.id)return res.status(400).json({ok:false,error:"No podés borrar tu propio usuario"});const ref=crmDb.collection("users").doc(req.params.id),snap=await ref.get();if(!snap.exists)return res.status(404).json({ok:false,error:"Usuario no encontrado"});await ref.delete();res.json({ok:true,readsEstimate:1,writesEstimate:1});}catch(e){res.status(500).json({ok:false,error:e.message});}});
+
+function isTotalOwner(v){return String(v||"").trim().toUpperCase()==="__TOTAL__";}
+async function totalOwnerScope(req){
+  const scope=await visibleOwners(req.authUser);
+  if(scope===null)return {all:true,owners:[]};
+  return {all:false,owners:(scope||[]).map(cleanOwner).filter(Boolean)};
+}
+function inRangeMs(ms,range){if(!range.startDate&&!range.endDate)return true;return !!ms&&ms>=range.startDate.getTime()&&ms<range.endDate.getTime();}
+async function loadDealsForScope(scope){
+  if(scope.all){const snap=await crmDb.collection("deals").limit(10000).get();return {rows:snap.docs.map(d=>({id:d.id,...(d.data()||{})})),reads:snap.size};}
+  let rows=[],reads=0;for(const owner of scope.owners.slice(0,50)){const snap=await crmDb.collection("deals").where("owner","==",owner).limit(5000).get();reads+=snap.size;rows.push(...snap.docs.map(d=>({id:d.id,...(d.data()||{})})));}return {rows,reads};
+}
+function aggregateMetricsFromRows(rows,range,today){
+  const m={owner:"__TOTAL__",nuevosProspectos:0,nuevosProspectosVencidos:0,seguimiento:0,seguimientoVencidos:0,marcaPersonal:0,marcaPersonalVencidos:0,esperandoPI:0,esperandoPIVencidos:0,paraCotizar:0,paraCotizarVencidos:0,cotizadoParaEnviar:0,cotizadoParaEnviarVencidos:0,horno:0,hornoVencidos:0,vencidosClave:0,totalCalidad:0,calidadDescartado:0,calidadNoResponde:0,calidadRegular:0,calidadBueno:0,calidadExcelente:0,buenoExcelente:0,buenoExcelentePct:0};
+  const stageMap={"Seguimiento":["seguimiento","seguimientoVencidos"],"Marca personal":["marcaPersonal","marcaPersonalVencidos"],"Esperando PI":["esperandoPI","esperandoPIVencidos"],"Para cotizar":["paraCotizar","paraCotizarVencidos"],"Cotizado para enviar":["cotizadoParaEnviar","cotizadoParaEnviarVencidos"],"Horno":["horno","hornoVencidos"]};
+  for(const x of rows){const stage=String(x.stage||"").trim(),due=String(x.dueDate||"").trim(),overdue=!!due&&due<today,pair=stageMap[stage];if(pair){m[pair[0]]++;if(overdue)m[pair[1]]++;}if(overdue&&["Nuevos Prospectos",...STATUS_STAGES].includes(stage))m.vencidosClave++;const created=tsMillis(x.createdAt);if(inRangeMs(created,range)){m.nuevosProspectos++;if(overdue)m.nuevosProspectosVencidos++;m.totalCalidad++;const q=qualityKey(x.leadQuality);if(q==="DESCARTADO")m.calidadDescartado++;else if(q==="NO_RESPONDE")m.calidadNoResponde++;else if(q==="REGULAR")m.calidadRegular++;else if(q==="BUENO")m.calidadBueno++;else if(q==="EXCELENTE")m.calidadExcelente++;if(q==="BUENO"||q==="EXCELENTE")m.buenoExcelente++;}}
+  m.buenoExcelentePct=m.totalCalidad?Math.round(m.buenoExcelente*100/m.totalCalidad):0;return m;
+}
+
 const MY_STATUS_CACHE_TTL_MS=60000;
 const myStatusOwnerCache=new Map();
 function tsMillis(v){if(!v)return 0;if(typeof v.toMillis==="function")return Number(v.toMillis()||0);if(v instanceof Date)return Number(v.getTime()||0);if(typeof v._seconds==="number")return Number(v._seconds*1000);if(typeof v.seconds==="number")return Number(v.seconds*1000);const d=new Date(v);return Number.isNaN(d.getTime())?0:d.getTime();}
@@ -47,7 +66,9 @@ async function exactMyStatusFallback(owner,range,today){
   return {metrics:m,readsEstimate:cached&&cached.expiresAt>now?0:rows.length,cached:!!(cached&&cached.expiresAt>now),scanned:rows.length};
 }
 router.get("/my-status",async(req,res)=>{try{
-  const owner=await allowedOwner(req,req.query.owner),range=periodRange(req.query.period,req.query.start,req.query.end),today=todayBA();
+  const range=periodRange(req.query.period,req.query.start,req.query.end),today=todayBA();
+  if(isTotalOwner(req.query.owner)){const scope=await totalOwnerScope(req),loaded=await loadDealsForScope(scope),metrics=aggregateMetricsFromRows(loaded.rows,range,today);return res.json({ok:true,metrics,period:range,readsEstimate:loaded.reads,degraded:false,total:true,note:"TOTAL: suma todos los owners visibles para tu usuario."});}
+  const owner=await allowedOwner(req,req.query.owner);
   let readsEstimate=0;const metricErrors=[];
   const metrics={owner,nuevosProspectos:0,nuevosProspectosVencidos:0,seguimiento:0,seguimientoVencidos:0,marcaPersonal:0,marcaPersonalVencidos:0,esperandoPI:0,esperandoPIVencidos:0,paraCotizar:0,paraCotizarVencidos:0,horno:0,hornoVencidos:0,vencidosClave:0,totalCalidad:0,calidadDescartado:0,calidadNoResponde:0,calidadRegular:0,calidadBueno:0,calidadExcelente:0,buenoExcelente:0,buenoExcelentePct:0};
   const base=crmDb.collection("deals").where("owner","==",owner);
@@ -68,7 +89,8 @@ router.get("/my-status",async(req,res)=>{try{
   return res.json({ok:true,metrics,period:range,readsEstimate,degraded:false,note:"Mi Estado exacto con agregaciones COUNT."});
 }catch(e){res.status(e.status||500).json({ok:false,error:e.message||String(e)});}});
 router.get("/my-status/deals",async(req,res)=>{try{
-  const owner=await allowedOwner(req,req.query.owner);
+  const totalMode=isTotalOwner(req.query.owner);
+  const owner=totalMode?"__TOTAL__":await allowedOwner(req,req.query.owner);
   const stage=String(req.query.stage||"").trim();
   const limit=Math.max(1,Math.min(50,Number(req.query.limit||25)||25));
   const offset=Math.max(0,Math.min(500,Number(req.query.offset||0)||0));
@@ -92,6 +114,7 @@ router.get("/my-status/deals",async(req,res)=>{try{
   }
   function publicRow(x){return {id:x.id,title:x.title||"",contactName:x.contactName||"",company:x.company||"",stage:x.stage||"",dueDate:x.dueDate||"",owner:x.owner||"",leadQuality:qualityKey(x.leadQuality),value:Number(x.value||0),notes:String(x.notes||""),createdAt:tsMillis(x.createdAt)||0,updatedAt:tsMillis(x.updatedAt)||0};}
   function fromRows(rows,readsEstimate,source,note){const filtered=filterRows(rows),items=filtered.slice(offset,offset+limit).map(publicRow);return res.json({ok:true,items,total:filtered.length,offset,nextOffset:offset+items.length,hasMore:offset+items.length<filtered.length,readsEstimate,source,note:note||""});}
+  if(totalMode){const scope=await totalOwnerScope(req),loaded=await loadDealsForScope(scope);return fromRows(loaded.rows,loaded.reads,"total-scope","TOTAL: detalle de todos los owners visibles.");}
   // Si Mi Estado ya hizo el fallback exacto, reutilizamos esa foto del owner: 0 reads.
   if(cached&&cached.expiresAt>Date.now())return fromRows(cached.rows,0,"owner-cache","Detalle servido desde cache; 0 reads adicionales.");
   try{
@@ -117,5 +140,24 @@ router.get("/my-status/deals",async(req,res)=>{try{
     return fromRows(cacheNow?.rows||[],exact.readsEstimate,exact.cached?"owner-cache":"owner-fallback",exact.cached?"Detalle servido desde cache; 0 reads adicionales.":"Detalle servido desde un único fallback exacto del owner y cacheado 60 s.");
   }
 }catch(e){res.status(e.status||500).json({ok:false,error:e.message||String(e)});}});
+
+
+router.get("/my-ads",async(req,res)=>{try{
+  const range=periodRange(req.query.period,req.query.start,req.query.end);
+  const ownerFilter=cleanOwner(req.query.owner||"");
+  const vis=await visibleOwners(req.authUser);
+  if(ownerFilter&&vis!==null&&!vis.includes(ownerFilter))return res.status(403).json({ok:false,error:"Owner fuera de tus permisos"});
+  const snap=await inboxDb.collection("conversations").where("leadOriginType","==","meta_ad").limit(5000).get();
+  let convs=snap.docs.map(d=>({id:d.id,...(d.data()||{})})).filter(c=>inRangeMs(tsMillis(c.leadOriginAt||c.createdAt),range));
+  if(ownerFilter)convs=convs.filter(c=>cleanOwner(c.ownerEmail)===ownerFilter);else if(vis!==null)convs=convs.filter(c=>vis.includes(cleanOwner(c.ownerEmail)));
+  const dealIds=[...new Set(convs.map(c=>String(c.dealId||"").trim()).filter(Boolean))];
+  const dealMap=new Map();let crmReads=0;
+  for(let i=0;i<dealIds.length;i+=30){const chunk=dealIds.slice(i,i+30);const ds=await crmDb.collection("deals").where(admin.firestore.FieldPath.documentId(),"in",chunk).get();crmReads+=ds.size;for(const d of ds.docs)dealMap.set(d.id,{id:d.id,...(d.data()||{})});}
+  const rows=convs.map(c=>{const d=dealMap.get(String(c.dealId||""))||{};const adId=String(c.leadOriginAdId||c.referralAdId||"").trim();const adName=String(c.leadOriginHeadline||c.referralHeadline||"").trim()||"Publicidad sin título";const owner=cleanOwner(d.owner||c.ownerEmail)||"sin asignar";let stage=String(d.stage||c.stage||"Nuevos Prospectos").trim()||"Nuevos Prospectos";if(stage.toLowerCase()==="nuevo")stage="Nuevos Prospectos";const quality=String(d.leadQuality||"").trim()?qualityKey(d.leadQuality):"SIN_CALIFICAR";return {conversationId:c.id,dealId:String(c.dealId||""),contactName:String(c.contactName||c.profileName||c.waFrom||""),phone:String(c.waFrom||""),owner,stage,quality,adId,adName,firstMessage:String(c.leadOriginMessage||c.leadOriginBody||c.referralBody||""),lineLabel:String(c.lineLabel||c.gatewayLineName||c.inboundTo||""),enteredAt:tsMillis(c.leadOriginAt||c.createdAt)||0};});
+  const byAd=new Map();for(const r of rows){const k=r.adId||r.adName;let g=byAd.get(k);if(!g){g={adId:r.adId,adName:r.adName,total:0,buenos:0,horno:0,ganados:0,seguimiento:0,marcaPersonal:0,nuevos:0};byAd.set(k,g);}g.total++;if(r.quality==="BUENO"||r.quality==="EXCELENTE")g.buenos++;if(r.stage==="Horno")g.horno++;if(/^Ganado/i.test(r.stage))g.ganados++;if(r.stage==="Seguimiento")g.seguimiento++;if(r.stage==="Marca personal")g.marcaPersonal++;if(r.stage==="Nuevos Prospectos")g.nuevos++;}
+  const summary={total:rows.length,buenos:rows.filter(r=>r.quality==="BUENO"||r.quality==="EXCELENTE").length,horno:rows.filter(r=>r.stage==="Horno").length,ganados:rows.filter(r=>/^Ganado/i.test(r.stage)).length,nuevos:rows.filter(r=>r.stage==="Nuevos Prospectos").length};
+  rows.sort((a,b)=>b.enteredAt-a.enteredAt);const ads=[...byAd.values()].sort((a,b)=>b.total-a.total);
+  return res.json({ok:true,period:range,summary,ads,items:rows,readsEstimate:snap.size+crmReads,note:"Publicidad medida desde el origen fijo Meta Ads; etapa/calidad actuales desde CRM cuando existe trato vinculado."});
+}catch(e){return res.status(500).json({ok:false,error:e.message||String(e)});}});
 
 module.exports=router;

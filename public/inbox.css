@@ -390,3 +390,11 @@ body{
   .shell.chatOpen .crmCard{border-radius:16px;padding:14px}
   .shell.chatOpen .crmPrimaryLink{padding:13px 12px;font-size:13px}
 }
+
+/* v1.5.42 - calidad editable + enviar adjunto CRM al chat */
+.crmQualityEditor{margin-top:10px;padding:10px;border:1px solid #d7ead1;border-radius:11px;background:#f6fbf3}
+.crmQualityEditor span{color:#4b7f34}
+.crmFileRow .fileView{min-width:0;flex:1;text-align:left;border:0;background:transparent;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;font-weight:750;color:#344054;cursor:pointer}
+.fileSendChat{border:1px solid #b7df9f;background:#eef9e8;color:#2f7d16;border-radius:8px;padding:6px 8px;font-size:9px;font-weight:900;cursor:pointer;white-space:nowrap}
+.fileSendChat:hover{background:#def4d1}.fileSendChat:disabled{opacity:.55;cursor:wait}
+@media(max-width:760px){.crmFileRow{align-items:stretch;flex-wrap:wrap}.crmFileRow .fileView{flex-basis:100%}.fileSendChat{flex:1;font-size:11px;padding:9px}.fileDelete{width:36px;height:36px}}

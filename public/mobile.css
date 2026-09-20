@@ -1,0 +1,95 @@
+/* MRAPI HUB mobile layer v1.5.36-mobile
+   Applies to Hub, Bandeja, CRM, Contactos, Agenda, Recontacto, Mi Estado and Usuarios.
+   Desktop stays unchanged; rules activate mainly <= 850px. */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{overflow-x:hidden}
+button,a,select,input,textarea{touch-action:manipulation}
+@media(max-width:850px){
+  :root{--mrapi-mobile-nav-h:62px}
+  html,body{width:100%;max-width:100vw;overscroll-behavior-x:none}
+  body{padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right)}
+  button,.btn,.icon-btn,.miniBtn,.quickFilter,.tab{min-height:40px}
+  input,select,textarea{font-size:16px!important;max-width:100%}
+  img{max-width:100%}
+
+  /* HUB home */
+  .hubTop{padding-top:env(safe-area-inset-top);height:calc(58px + env(safe-area-inset-top))!important;position:sticky;top:0;z-index:50}
+  .hubMain{padding:12px 10px calc(84px + env(safe-area-inset-bottom))!important}
+  .hero{padding:18px 16px!important;border-radius:16px!important}
+  .hero h1{font-size:28px!important;line-height:1.06!important;margin:8px 0 10px!important}
+  .hero p{font-size:13px!important;line-height:1.45!important}
+  .hubGrid{grid-template-columns:1fr!important;gap:10px!important}
+  .hubModule{min-height:0!important;padding:16px!important;border-radius:16px!important}
+  .hubModule h2{font-size:20px!important;margin:2px 0 5px!important}
+  .hubModule p{font-size:12px!important;line-height:1.4!important}
+  .hubStatus{grid-template-columns:1fr!important;gap:8px!important}
+  .hubMobileNav{display:grid!important;grid-template-columns:repeat(4,1fr);position:fixed;left:0;right:0;bottom:0;z-index:90;background:#20242b;border-top:1px solid rgba(255,255,255,.08);padding:5px 6px calc(5px + env(safe-area-inset-bottom));min-height:var(--mrapi-mobile-nav-h)}
+  .hubMobileNav a{color:#c9d0d2;text-decoration:none;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:9px;font-weight:800;min-width:0}
+  .hubMobileNav a b{font-size:18px;line-height:20px}.hubMobileNav a.active{color:var(--tenant-primary,#57b530)}
+
+  /* Bandeja */
+  .shell{height:100dvh!important;max-width:100vw;overflow:hidden}
+  .scbTopbar{padding-top:env(safe-area-inset-top)!important;height:calc(56px + env(safe-area-inset-top))!important}
+  .shell{grid-template-rows:calc(56px + env(safe-area-inset-top)) auto minmax(0,1fr)!important}
+  .kpiStrip{display:flex!important;overflow-x:auto;scroll-snap-type:x proximity;gap:7px!important;padding:7px 8px!important;scrollbar-width:none}
+  .kpiStrip::-webkit-scrollbar{display:none}.kpiCard{flex:0 0 44vw;min-width:145px;scroll-snap-align:start}
+  .shell.chatOpen .kpiStrip{display:none!important}
+  .shell.chatOpen{grid-template-rows:calc(56px + env(safe-area-inset-top)) minmax(0,1fr)!important}
+  .workspace{width:100vw;min-width:0}
+  .sidebar,.chat{width:100%;max-width:100vw}
+  .sideHead{padding:10px!important}.sideActions{display:grid!important;grid-template-columns:1fr 1fr}.searchRow input{height:42px}
+  .quickFilters{margin-left:-2px;margin-right:-2px}.ownerFilterBtn{min-height:42px}
+  .item{padding:12px 11px!important}.name{font-size:14px}.preview{font-size:12px}
+  .chatHead{gap:6px;align-items:flex-start!important;min-height:62px!important;height:auto!important;overflow:visible}
+  .chatIdentity{min-width:0;flex:1}.chatIdentity>div:last-child{min-width:0}.chatTitle{display:block;max-width:58vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chatActions{display:flex;max-width:46vw;overflow-x:auto;flex-wrap:nowrap!important;scrollbar-width:none;padding-bottom:2px}.chatActions::-webkit-scrollbar{display:none}.chatActions>*{flex:0 0 auto}
+  #backBtn{min-width:40px;padding:7px!important}.avatarCircle{flex:0 0 auto}
+  .adContext{max-height:86px!important}.multiLineAlert{font-size:11px}.multiLineAlert button{min-height:36px;flex:0 0 auto}
+  .messages{padding:9px!important;overscroll-behavior:contain}.msgRow{margin:6px 0}.bubble{max-width:92%!important;padding:9px 10px!important;border-radius:13px!important}
+  .composer{padding:7px 8px calc(8px + env(safe-area-inset-bottom))!important}.composerTools{display:flex!important;gap:6px!important;overflow-x:auto;flex-wrap:nowrap!important;scrollbar-width:none}.composerTools::-webkit-scrollbar{display:none}.composerTools>*{flex:0 0 auto}.composerTools select{max-width:48vw!important}.attachButton,.audioRecordBtn,.composerTools .btn{min-height:38px;display:inline-flex!important;align-items:center}
+  .modernComposer{grid-template-columns:minmax(0,1fr) 44px!important}.modernComposer textarea{min-height:44px!important;max-height:112px!important}.sendCircle{width:44px!important;height:44px!important;min-width:44px!important}
+  .crmPanel{width:100vw!important;max-width:100vw!important;top:calc(56px + env(safe-area-inset-top))!important;bottom:0!important}.crmPanelBody{padding-bottom:calc(74px + env(safe-area-inset-bottom))!important}
+  .lineModalBack{padding:0!important;align-items:flex-end!important}.lineModal,.ticketModal{width:100vw!important;max-width:100vw!important;max-height:92dvh!important;border-radius:20px 20px 0 0!important;padding-bottom:env(safe-area-inset-bottom)}
+  .mobileBottom{height:calc(58px + env(safe-area-inset-bottom))!important;padding-bottom:env(safe-area-inset-bottom)}
+  .shell.chatOpen .mobileBottom{display:none!important}
+
+  /* CRM pipeline */
+  .crm-shell>.topbar{padding-top:env(safe-area-inset-top)!important;height:calc(58px + env(safe-area-inset-top))!important;position:sticky;top:0;z-index:60}
+  .crm-main{padding:10px 9px calc(82px + env(safe-area-inset-bottom))!important;max-width:100vw;overflow-x:hidden}
+  .page-head{gap:8px}.page-head h1{font-size:22px!important}.crmModuleBar{margin-bottom:8px!important}
+  .stats{gap:6px!important}.stat{min-width:0}.stat-label{font-size:9px!important}.stat-value{font-size:18px!important}
+  .filters{top:calc(64px + env(safe-area-inset-top))!important;left:8px!important;right:8px!important;max-height:calc(100dvh - 90px);overflow:auto}
+  .kanban-wrap,.list-view{max-width:100%;overflow-x:hidden}.deal-card{border-radius:13px!important}.deal-row{min-width:0}
+  .drawer{max-width:100vw!important;height:100dvh!important}.drawer-body{overflow-x:hidden}.drawer-actions{padding-bottom:calc(10px + env(safe-area-inset-bottom))!important}
+  .modal-backdrop{align-items:flex-end!important;padding:0!important}.stage-modal{width:100vw!important;max-width:100vw!important;border-radius:20px 20px 0 0!important;max-height:92dvh!important;padding-bottom:env(safe-area-inset-bottom)}
+  .bottom-nav{min-height:calc(62px + env(safe-area-inset-bottom))!important;padding-bottom:env(safe-area-inset-bottom)!important}
+
+  /* CRM tools: Contactos, Agenda, Mi Estado, Usuarios */
+  .tools-top{padding-top:env(safe-area-inset-top)!important;height:calc(58px + env(safe-area-inset-top))!important;position:sticky;top:0;z-index:60}
+  .tools-main{padding:10px 9px calc(82px + env(safe-area-inset-bottom))!important;max-width:100vw;overflow-x:hidden}
+  .tools-head{gap:8px}.tools-head h1{font-size:22px!important}.tools-head>.btn,.tools-head>a.btn{width:100%;text-align:center}
+  .quick-modules{margin-left:-2px;margin-right:-2px;scrollbar-width:none}.quick-modules::-webkit-scrollbar{display:none}
+  .toolbar{gap:7px!important}.toolbar>*{min-width:0!important}.tabs{overflow-x:auto;flex-wrap:nowrap!important;scrollbar-width:none}.tabs::-webkit-scrollbar{display:none}.tab{white-space:nowrap}
+  .card{border-radius:14px!important}.agenda-grid{grid-template-columns:1fr!important}
+  .table-wrap{overflow:visible!important}.row-actions{display:flex;gap:6px;flex-wrap:wrap}.row-actions .btn{flex:1 1 auto}
+  .modal-back{padding:0!important;align-items:flex-end!important}.modal{width:100vw!important;max-width:100vw!important;border-radius:20px 20px 0 0!important;max-height:92dvh!important;padding-bottom:env(safe-area-inset-bottom)}
+
+  /* Recontacto */
+  .dueTop{padding-top:env(safe-area-inset-top)!important;height:calc(58px + env(safe-area-inset-top))!important;position:sticky;top:0;z-index:60}
+  .dueMain{padding:10px 9px calc(82px + env(safe-area-inset-bottom))!important;overflow-x:hidden}
+  .dueHead{align-items:flex-start!important;flex-direction:column!important;gap:8px}.dueHead h1{font-size:22px!important}.dueModules{scrollbar-width:none}.dueModules::-webkit-scrollbar{display:none}
+  .dueFilters,.sendGrid,.campaignEditGrid,.campaignCreateOptions{grid-template-columns:1fr!important}.dueStats{grid-template-columns:1fr 1fr!important}
+  .dueInfo{gap:8px;flex-direction:column}.dueRow{grid-template-columns:28px minmax(0,1fr)!important}.dueDateCell,.rowActions{grid-column:2!important}.rowActions{justify-content:flex-start!important;flex-wrap:wrap}
+  .dueModalBack{padding:0!important;align-items:flex-end!important}.dueModal{width:100vw!important;max-width:100vw!important;max-height:92dvh!important;border-radius:20px 20px 0 0!important;padding-bottom:env(safe-area-inset-bottom)}
+
+  /* Generic resilience */
+  [class*="Grid"],[class*="grid"]{max-width:100%}
+  pre,code{white-space:pre-wrap;overflow-wrap:anywhere}
+}
+@media(max-width:420px){
+  .kpiCard{flex-basis:48vw;min-width:138px}.bubble{max-width:94%!important}.chatTitle{max-width:52vw}.chatActions{max-width:42vw}
+  .stats,.dueStats,.status-summary-grid,.quality-grid{grid-template-columns:1fr 1fr!important}
+}
+@media(max-width:360px){
+  .stats,.dueStats,.status-summary-grid,.quality-grid{grid-template-columns:1fr!important}.kpiCard{flex-basis:70vw}
+}

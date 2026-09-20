@@ -102,7 +102,7 @@ function canonicalLines(values){
 }
 
 async function resolveOutboundRoute(conversation={}){
-  const from=normalizedLine(conversation.inboundTo||conversation.lineId||conversation.preferredLineId||wa.defaultFrom||"");
+  const from=normalizedLine(conversation.preferredLineId||conversation.inboundTo||conversation.lineId||wa.defaultFrom||"");
   if(!from) return {from:"",provider:"twilio",gatewayLineId:"",gatewayTenantId:"",catalog:null,reads:0};
 
   let reads=0, catalog=null;
@@ -632,9 +632,15 @@ router.get("/conversations/:id/lines",authRequired,async(req,res)=>{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const selected=await inboxDb.collection("conversations").doc(id).get();
     if(!selected.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
     const c=selected.data()||{}; const waFrom=String(c.waFrom||""); if(!waFrom)return res.json({ok:true,items:[],readsEstimate:1});
-    const snap=await inboxDb.collection("conversations").where("waFrom","==",waFrom).limit(50).get();
-    const items=snap.docs.map(d=>{const x=d.data()||{};const lineId=normalizedLine(x.inboundTo||x.lineId||"");return {conversationId:d.id,lineId,lastMessageAt:iso(x.lastMessageAt||x.updatedAt),current:d.id===id,historical:true,label:cleanString(x.lineLabel||x.gatewayLineName||"",120)};}).filter(x=>x.lineId).sort((a,b)=>String(b.lastMessageAt||"").localeCompare(String(a.lastMessageAt||"")));
-    return res.json({ok:true,items,readsEstimate:1+snap.size});
+    const [snap,catalog]=await Promise.all([inboxDb.collection("conversations").where("waFrom","==",waFrom).limit(50).get(),inboxDb.collection(LINE_CATALOG_COLLECTION).orderBy("phone","asc").limit(500).get()]);
+    const linked=new Set(uniqueStrings(c.duplicateConversationIds||[])); linked.add(id);
+    const byLine=new Map();
+    for(const d of snap.docs){const x=d.data()||{};const lineId=normalizedLine(x.inboundTo||x.lineId||"");if(!lineId)continue;byLine.set(lineId,{conversationId:d.id,lineId,lastMessageAt:iso(x.lastMessageAt||x.updatedAt),linked:linked.has(d.id),current:d.id===id,available:true,historical:true,label:""});}
+    for(const d of catalog.docs){const li=lineItem(d);if(!li.lineId||!li.active)continue;const prev=byLine.get(li.lineId)||{};byLine.set(li.lineId,{conversationId:prev.conversationId||"",lineId:li.lineId,lastMessageAt:prev.lastMessageAt||li.lastSeenAt,linked:Boolean(prev.linked),current:Boolean(prev.current),available:true,historical:Boolean(prev.historical),label:li.label||prev.label||""});}
+    const def=normalizedLine(wa.defaultFrom); if(def&&!byLine.has(def))byLine.set(def,{conversationId:"",lineId:def,lastMessageAt:null,linked:false,current:false,available:true,historical:false,label:"Línea predeterminada"});
+    const preferred=normalizedLine(c.preferredLineId||c.inboundTo||c.lineId||"");
+    const items=[...byLine.values()].map(x=>({...x,preferred:x.lineId===preferred}));
+    return res.json({ok:true,items,preferredLineId:preferred,readsEstimate:1+snap.size+catalog.size});
   }catch(e){console.error("conversation lines",e);return res.status(500).json({ok:false,error:e.message});}
 });
 router.post("/conversations/:id/lines/link-all",authRequired,async(req,res)=>{
@@ -727,9 +733,17 @@ router.get("/conversations/:id/messages",authRequired,async(req,res)=>{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);
     if(!id) return res.status(400).json({ok:false,error:"Conversación inválida"});
     const requested=Math.max(20,Math.min(Number(req.query.limit||60),100));
-    const snap=await inboxDb.collection("conversations").doc(id).collection("messages").orderBy("timestamp","desc").limit(requested).get();
-    const items=snap.docs.map(d=>message(d,id)).sort((a,b)=>String(a.timestamp||"").localeCompare(String(b.timestamp||"")));
-    return res.json({ok:true,items,readsEstimate:snap.size,relatedConversations:1});
+    const related=uniqueStrings([id, ...(Array.isArray(req.query.relatedIds) ? req.query.relatedIds : String(req.query.relatedIds||"").split(","))]).slice(0,10);
+    const all=[]; let reads=0;
+    for(const conversationId of related){
+      const snap=await inboxDb.collection("conversations").doc(conversationId).collection("messages").orderBy("timestamp","desc").limit(requested).get();
+      reads += snap.size;
+      for(const d of snap.docs) all.push(message(d,conversationId));
+    }
+    const seen=new Set();
+    const dedup=all.filter(m=>{ const k=m.messageSid || `${m.conversationId}:${m.id}`; if(seen.has(k))return false; seen.add(k); return true; });
+    dedup.sort((a,b)=>String(a.timestamp||"").localeCompare(String(b.timestamp||"")));
+    return res.json({ok:true,items:dedup,readsEstimate:reads,relatedConversations:related.length});
   }catch(e){ console.error("inbox messages",e); return res.status(500).json({ok:false,error:e.message}); }
 });
 

@@ -398,3 +398,38 @@ body{
 .fileSendChat{border:1px solid #b7df9f;background:#eef9e8;color:#2f7d16;border-radius:8px;padding:6px 8px;font-size:9px;font-weight:900;cursor:pointer;white-space:nowrap}
 .fileSendChat:hover{background:#def4d1}.fileSendChat:disabled{opacity:.55;cursor:wait}
 @media(max-width:760px){.crmFileRow{align-items:stretch;flex-wrap:wrap}.crmFileRow .fileView{flex-basis:100%}.fileSendChat{flex:1;font-size:11px;padding:9px}.fileDelete{width:36px;height:36px}}
+
+/* v1.5.43 - archivos CRM apilados, sin scroll lateral */
+.crmFileList{overflow-x:hidden}
+.crmFileRow{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:7px;
+  align-items:center;
+  width:100%;
+  min-width:0;
+  box-sizing:border-box;
+}
+.crmFileRow .fileView{
+  grid-column:1 / -1;
+  width:100%;
+  min-width:0;
+  white-space:normal;
+  overflow-wrap:anywhere;
+  line-height:1.25;
+}
+.fileSendChat{
+  grid-column:1;
+  width:100%;
+  min-width:0;
+  white-space:normal;
+  text-align:center;
+  padding:8px 10px;
+}
+.fileDelete{grid-column:2;grid-row:2}
+@media(max-width:760px){
+  .crmFileRow{grid-template-columns:minmax(0,1fr) 38px;flex-wrap:unset}
+  .crmFileRow .fileView{grid-column:1 / -1;flex-basis:auto}
+  .fileSendChat{grid-column:1;font-size:11px;padding:10px}
+  .fileDelete{grid-column:2;grid-row:2;width:38px;height:38px}
+}

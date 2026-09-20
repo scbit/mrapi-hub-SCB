@@ -111,8 +111,16 @@ async function sendGatewayMedia({tenantId,lineId,to,type,mediaUrl,filename,capti
 }
 async function listGatewayTemplates({tenantId,lineId}){
   if(!gatewayConfigured()) throw new Error("MRAPI Gateway no configurado");
-  const r=await axios.get(`${config.gatewayUrl}/v1/templates`,{params:{tenantId:String(tenantId||config.gatewayTenantId||config.tenantId),lineId:String(lineId)},headers:{"x-api-key":config.gatewayApiKey},timeout:20000});
-  return (r.data?.templates||[]).map(t=>({sid:t.name,name:t.name,language:t.language||"",provider:"meta",components:t.components||[],category:t.category||""}));
+  const resolvedTenant=String(tenantId||config.gatewayTenantId||config.tenantId);
+  const resolvedLine=String(lineId||"");
+  try{
+    const r=await axios.get(`${config.gatewayUrl}/v1/templates`,{params:{tenantId:resolvedTenant,lineId:resolvedLine},headers:{"x-api-key":config.gatewayApiKey},timeout:20000});
+    console.info("gateway templates ok",JSON.stringify({tenantId:resolvedTenant,lineId:resolvedLine,count:(r.data?.templates||[]).length}));
+    return (r.data?.templates||[]).map(t=>({sid:t.name,name:t.name,language:t.language||"",provider:"meta",components:t.components||[],category:t.category||""}));
+  }catch(e){
+    console.error("gateway templates failed",JSON.stringify({tenantId:resolvedTenant,lineId:resolvedLine,status:e?.response?.status||null,data:e?.response?.data||null,message:e?.message||String(e)}));
+    throw e;
+  }
 }
 async function sendGatewayTemplate({tenantId,lineId,to,name,language,components=[]}){
   if(!gatewayConfigured()) throw new Error("MRAPI Gateway no configurado");

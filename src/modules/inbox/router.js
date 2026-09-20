@@ -825,13 +825,15 @@ router.get("/bot/status",authRequired,async(req,res)=>{
 });
 
 router.get("/templates",authRequired,async(req,res)=>{
+  const conversationId=cleanString(req.query.conversationId,180);
   try{
-    const conversationId=cleanString(req.query.conversationId,180);
     if(conversationId){
       const c=await loadConversationForSend(conversationId);
       const route=await resolveOutboundRoute(c.data);
+      console.info("templates route",JSON.stringify({conversationId,provider:route.provider,from:route.from,gatewayLineId:route.gatewayLineId,gatewayTenantId:route.gatewayTenantId,lineLabel:c.data?.lineLabel||"",inboundTo:c.data?.inboundTo||"",lineId:c.data?.lineId||"",providerStored:c.data?.provider||""}));
       if(route.provider==="meta"){
         const templates=await wa.listGatewayTemplates({tenantId:route.gatewayTenantId,lineId:route.gatewayLineId});
+        console.info("templates meta ok",JSON.stringify({conversationId,gatewayLineId:route.gatewayLineId,count:templates.length}));
         const repair={provider:"meta",gatewayLineId:route.gatewayLineId,gatewayTenantId:route.gatewayTenantId,inboundTo:route.from,lineId:route.from,updatedAt:FieldValue.serverTimestamp()};
         if(route.catalog?.label) repair.lineLabel=cleanString(route.catalog.label,120);
         if(route.catalog?.gatewayLineName) repair.gatewayLineName=cleanString(route.catalog.gatewayLineName,120);
@@ -842,7 +844,7 @@ router.get("/templates",authRequired,async(req,res)=>{
     }
     const templates=await wa.listApprovedTemplates();
     return res.json({ok:true,templates,readsEstimate:0,provider:"twilio"});
-  }catch(e){console.error("templates",e);return res.status(500).json({ok:false,error:e.message});}
+  }catch(e){console.error("templates failed",JSON.stringify({conversationId,error:e?.message||String(e),status:e?.response?.status||null,data:e?.response?.data||null}));return res.status(500).json({ok:false,error:e.message});}
 });
 
 router.post("/conversations/:id/send",authRequired,async(req,res)=>{

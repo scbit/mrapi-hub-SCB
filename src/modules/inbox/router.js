@@ -828,7 +828,12 @@ router.get("/templates",authRequired,async(req,res)=>{
   const conversationId=cleanString(req.query.conversationId,180);
   try{
     if(conversationId){
-      const c=await loadConversationForSend(conversationId);
+      // Listing templates is read-only and must work in both BOT and HUMAN mode.
+      // HUMAN mode is still enforced by the actual send endpoints.
+      const ref=inboxDb.collection("conversations").doc(conversationId);
+      const snap=await ref.get();
+      if(!snap.exists){ const e=new Error("Conversación no encontrada"); e.status=404; throw e; }
+      const c={ref,data:snap.data()||{},reads:1};
       const route=await resolveOutboundRoute(c.data);
       console.info("templates route",JSON.stringify({conversationId,provider:route.provider,from:route.from,gatewayLineId:route.gatewayLineId,gatewayTenantId:route.gatewayTenantId,lineLabel:c.data?.lineLabel||"",inboundTo:c.data?.inboundTo||"",lineId:c.data?.lineId||"",providerStored:c.data?.provider||""}));
       if(route.provider==="meta"){

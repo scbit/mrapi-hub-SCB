@@ -278,6 +278,7 @@ function summary(doc){
     inboundTo: d.inboundTo || "",
     lineId: d.lineId || d.inboundTo || "",
     preferredLineId: d.preferredLineId || "",
+    lineLabel: d.lineLabel || d.gatewayLineName || "",
     linkedLineIds: canonicalLines(d.linkedLineIds || []),
     lineCount: Math.max(1, canonicalLines([d.lineId||d.inboundTo||"", ...(d.linkedLineIds || [])]).length),
     ownerEmail: String(d.ownerEmail || "").toLowerCase(),

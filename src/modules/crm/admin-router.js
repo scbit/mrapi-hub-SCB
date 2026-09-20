@@ -29,8 +29,25 @@ async function totalOwnerScope(req){
 }
 function inRangeMs(ms,range){if(!range.startDate&&!range.endDate)return true;return !!ms&&ms>=range.startDate.getTime()&&ms<range.endDate.getTime();}
 async function loadDealsForScope(scope){
-  if(scope.all){const snap=await crmDb.collection("deals").limit(10000).get();return {rows:snap.docs.map(d=>({id:d.id,...(d.data()||{})})),reads:snap.size};}
-  let rows=[],reads=0;for(const owner of scope.owners.slice(0,50)){const snap=await crmDb.collection("deals").where("owner","==",owner).limit(5000).get();reads+=snap.size;rows.push(...snap.docs.map(d=>({id:d.id,...(d.data()||{})})));}return {rows,reads};
+  // Fallback/detalle: paginar para no truncar TOTAL en 10.000 documentos.
+  async function loadAll(q,max=50000){let rows=[],reads=0,last=null;while(rows.length<max){let x=q.orderBy(admin.firestore.FieldPath.documentId()).limit(Math.min(5000,max-rows.length));if(last)x=x.startAfter(last);const snap=await x.get();reads+=snap.size;if(!snap.size)break;rows.push(...snap.docs.map(d=>({id:d.id,...(d.data()||{})})));last=snap.docs[snap.docs.length-1];if(snap.size<5000)break;}return {rows,reads};}
+  if(scope.all)return loadAll(crmDb.collection("deals"));
+  let rows=[],reads=0;for(const owner of scope.owners.slice(0,50)){const r=await loadAll(crmDb.collection("deals").where("owner","==",owner),10000);reads+=r.reads;rows.push(...r.rows);}return {rows,reads};
+}
+async function exactTotalMetrics(scope,range,today){
+  const m={owner:"__TOTAL__",nuevosProspectos:0,nuevosProspectosVencidos:0,seguimiento:0,seguimientoVencidos:0,marcaPersonal:0,marcaPersonalVencidos:0,esperandoPI:0,esperandoPIVencidos:0,paraCotizar:0,paraCotizarVencidos:0,cotizadoParaEnviar:0,cotizadoParaEnviarVencidos:0,horno:0,hornoVencidos:0,vencidosClave:0,totalCalidad:0,calidadDescartado:0,calidadNoResponde:0,calidadRegular:0,calidadBueno:0,calidadExcelente:0,buenoExcelente:0,buenoExcelentePct:0};
+  const stageMap={"Seguimiento":["seguimiento","seguimientoVencidos"],"Marca personal":["marcaPersonal","marcaPersonalVencidos"],"Esperando PI":["esperandoPI","esperandoPIVencidos"],"Para cotizar":["paraCotizar","paraCotizarVencidos"],"Cotizado para enviar":["cotizadoParaEnviar","cotizadoParaEnviarVencidos"],"Horno":["horno","hornoVencidos"]};
+  const bases=scope.all?[crmDb.collection("deals")]:scope.owners.map(o=>crmDb.collection("deals").where("owner","==",o));
+  let readsEstimate=0;const errors=[];
+  async function sum(build,label){let n=0;for(const base of bases){try{n+=await countQuery(build(base));readsEstimate++;}catch(e){errors.push({metric:label,error:String(e&&e.message||e)});}}return n;}
+  for(const st of STATUS_STAGES){const k=stageMap[st];m[k[0]]=await sum(q=>q.where("stage","==",st),`stage:${st}`);m[k[1]]=await sum(q=>q.where("stage","==",st).where("dueDate","<",today),`overdue:${st}`);}
+  m.vencidosClave=Object.values(stageMap).reduce((n,k)=>n+Number(m[k[1]]||0),0);
+  const ranged=q=>(range.startDate&&range.endDate)?q.where("createdAt",">=",range.startDate).where("createdAt","<",range.endDate):q;
+  m.nuevosProspectos=await sum(ranged,"newProspects");
+  for(const qv of LEAD_QUALITY_VALUES){const n=await sum(q=>ranged(q).where("leadQuality","==",qv),`quality:${qv}`);m.totalCalidad+=n;if(qv==="DESCARTADO")m.calidadDescartado=n;else if(qv==="NO_RESPONDE")m.calidadNoResponde=n;else if(qv==="REGULAR")m.calidadRegular=n;else if(qv==="BUENO")m.calidadBueno=n;else if(qv==="EXCELENTE")m.calidadExcelente=n;}
+  m.buenoExcelente=m.calidadBueno+m.calidadExcelente;m.buenoExcelentePct=m.totalCalidad?Math.round(m.buenoExcelente*100/m.totalCalidad):0;
+  if(errors.length){const loaded=await loadDealsForScope(scope);return {metrics:aggregateMetricsFromRows(loaded.rows,range,today),readsEstimate:readsEstimate+loaded.reads,fallback:true,errors};}
+  return {metrics:m,readsEstimate,fallback:false,errors:[]};
 }
 function aggregateMetricsFromRows(rows,range,today){
   const m={owner:"__TOTAL__",nuevosProspectos:0,nuevosProspectosVencidos:0,seguimiento:0,seguimientoVencidos:0,marcaPersonal:0,marcaPersonalVencidos:0,esperandoPI:0,esperandoPIVencidos:0,paraCotizar:0,paraCotizarVencidos:0,cotizadoParaEnviar:0,cotizadoParaEnviarVencidos:0,horno:0,hornoVencidos:0,vencidosClave:0,totalCalidad:0,calidadDescartado:0,calidadNoResponde:0,calidadRegular:0,calidadBueno:0,calidadExcelente:0,buenoExcelente:0,buenoExcelentePct:0};
@@ -67,7 +84,7 @@ async function exactMyStatusFallback(owner,range,today){
 }
 router.get("/my-status",async(req,res)=>{try{
   const range=periodRange(req.query.period,req.query.start,req.query.end),today=todayBA();
-  if(isTotalOwner(req.query.owner)){const scope=await totalOwnerScope(req),loaded=await loadDealsForScope(scope),metrics=aggregateMetricsFromRows(loaded.rows,range,today);return res.json({ok:true,metrics,period:range,readsEstimate:loaded.reads,degraded:false,total:true,note:"TOTAL: suma todos los owners visibles para tu usuario."});}
+  if(isTotalOwner(req.query.owner)){const scope=await totalOwnerScope(req),exact=await exactTotalMetrics(scope,range,today);return res.json({ok:true,metrics:exact.metrics,period:range,readsEstimate:exact.readsEstimate,degraded:false,total:true,fallback:exact.fallback,note:exact.fallback?"TOTAL exacto por fallback paginado: se evitó el corte de 10.000 tratos.":"TOTAL exacto con COUNT: sin límite de 10.000 tratos."});}
   const owner=await allowedOwner(req,req.query.owner);
   let readsEstimate=0;const metricErrors=[];
   const metrics={owner,nuevosProspectos:0,nuevosProspectosVencidos:0,seguimiento:0,seguimientoVencidos:0,marcaPersonal:0,marcaPersonalVencidos:0,esperandoPI:0,esperandoPIVencidos:0,paraCotizar:0,paraCotizarVencidos:0,horno:0,hornoVencidos:0,vencidosClave:0,totalCalidad:0,calidadDescartado:0,calidadNoResponde:0,calidadRegular:0,calidadBueno:0,calidadExcelente:0,buenoExcelente:0,buenoExcelentePct:0};

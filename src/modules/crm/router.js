@@ -7,7 +7,7 @@ const crypto=require("crypto");
 const config=require("../../core/config");
 const {PIPELINE_STAGES,DEAL_TYPES,DEAL_TYPE_LABELS,LEAD_QUALITY_VALUES,LEAD_QUALITY_LABELS}=require("./constants");
 const {visibleOwners,canSeeOwner,canEditOwner,isAdminLike}=require("./access");
-const {ensureDealSearchIndex,searchDealsIndexed,buildSearchTerms}=require("./search-index");
+const {ensureDealSearchIndex,searchDealsIndexed,searchContactsIndexed,buildSearchTerms}=require("./search-index");
 const router=express.Router();
 router.use(authRequired);
 
@@ -328,11 +328,13 @@ router.get("/lookup",async(req,res)=>{
     // Índice global persistente. La primera vez hace un backfill único; después cada búsqueda
     // lee sólo candidatos del término en lugar de recorrer miles de tratos.
     const idx=await ensureDealSearchIndex();reads+=idx.reads||0;writes+=idx.writes||0;
-    const found=await searchDealsIndexed(term,50);reads+=found.reads;
-    for(const d of found.docs)await add("deal",d);
+    const [foundDeals,foundContacts]=await Promise.all([searchDealsIndexed(term,50),searchContactsIndexed(term,50)]);
+    reads+=foundDeals.reads+foundContacts.reads;
+    for(const d of foundDeals.docs)await add("deal",d);
+    for(const d of foundContacts.docs)await add("contact",d);
 
-    // Si encontramos contactos por teléfono, traer sus tratos vinculados.
-    const contactIds=items.filter(x=>x.kind==="contact").map(x=>x.id);
+    // Si encontramos el contacto por nombre o teléfono, traer sus tratos vinculados.
+    const contactIds=Array.from(new Set(items.filter(x=>x.kind==="contact").map(x=>x.id)));
     for(let i=0;i<contactIds.length;i+=30){
       const chunk=contactIds.slice(i,i+30);if(!chunk.length)continue;
       const snap=await crmDb.collection("deals").where("contactId","in",chunk).limit(50).get();

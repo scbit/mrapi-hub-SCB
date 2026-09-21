@@ -437,3 +437,6 @@ body{
 /* v1.5.56 — edición rápida del trato desde Bandeja */
 .crmStageEditor input{width:100%;padding:9px 10px;border:1px solid #dfe5dd;border-radius:10px;background:#f6faf5;font:inherit;font-size:12px;font-weight:700;color:#344054;outline:none}.crmStageEditor input:focus{border-color:#9bd893;box-shadow:0 0 0 3px rgba(47,183,27,.08)}.hubDealBasicsSave{width:100%;margin-top:8px;font-size:11px}
 @media(max-width:850px){.crmStageEditor input{font-size:16px}}
+
+
+.deliveryState{font-weight:800}.deliveryPending{color:#8a6d1d}.deliverySent{color:#667085}.deliveryDelivered{color:#2f6f44}.deliveryRead{color:#1f7a3d}.deliveryFailed{color:#b42318}.deliveryError{margin-top:4px;font-size:12px;line-height:1.35;color:#b42318;font-weight:700}

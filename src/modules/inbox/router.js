@@ -407,7 +407,9 @@ function message(doc, conversationId){
     from: d.from || "",
     to: d.to || "",
     timestamp: iso(d.timestamp || d.createdAt),
-    status: d.status || d.deliveryStatus || "",
+    status: d.deliveryStatus || d.status || "",
+    statusRaw: d.status || "",
+    deliveryError: d.deliveryError || d.errorMessage || d.error || d.providerStatusRaw?.errors?.[0]?.message || d.providerStatusRaw?.errors?.[0]?.title || d.providerStatusRaw?.error?.message || "",
     messageSid: d.messageSid || d.sid || "",
     media: Array.isArray(d.media) ? d.media.map(m=>({
       url: m?.url || "", contentType: m?.contentType || m?.mimeType || "", filename: m?.filename || "", gcsPath: m?.gcsPath || "", source: m?.source || ""

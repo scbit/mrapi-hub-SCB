@@ -15,7 +15,7 @@ function shell(){
   document.body.innerHTML=`<div class="dueShell">
   <header class="dueTop"><a class="dueBrand" href="/"><img src="/assets/tenant-logo"><div><b>MR API HUB</b><small>${esc(window.MRAPI_TENANT?.shortName||'MRAPI')}</small></div></a>
     <nav><a href="/inbox">▣ Bandeja</a><a class="active" href="/crm">▦ CRM</a><a href="/">◇ HUB</a></nav>
-    <span class="spacer"></span><span class="version-pill">v1.5.55</span><span class="who">${esc(S.user?.name||S.user?.email||'')}</span>
+    <span class="spacer"></span><span class="version-pill">v1.5.56</span><span class="who">${esc(S.user?.name||S.user?.email||'')}</span>
   </header>
   <main class="dueMain">
     <div class="dueHead"><div><h1>Centro de Recontacto</h1><p>Campañas de recontacto, vencidos y seguimiento comercial.</p></div><span class="spacer"></span><a class="btn secondary" href="/agenda">Agenda</a></div>

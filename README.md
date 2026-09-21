@@ -369,3 +369,16 @@ SSO does not share browser cookies across Cloud Run domains. The HUB creates a s
 
 ## v1.5.36
 Conversaciones separadas por contacto + línea; sin mezcla de historiales ni cambio de línea en conversaciones existentes.
+
+## Alerta CRM · Cotizado para enviar
+
+Cuando un trato cambia desde cualquier otra etapa a `Cotizado para enviar`, el HUB llama a MRAPI-WP en `/api/system/alerts/crm-cotizado-para-enviar`. La alerta usa el dueño del trato (no el usuario que hizo el movimiento), nombre del trato, cliente, valor y link directo al HUB. El guardado del CRM no se revierte si WhatsApp falla.
+
+Variables requeridas en el Cloud Run del HUB:
+
+```env
+MRAPI_WHATSAPP_BASE_URL=https://mrapi-wp-604957912671.us-central1.run.app
+MRAPI_WHATSAPP_SYSTEM_TOKEN=<mismo valor que MRAPI_SYSTEM_TOKEN de MRAPI-WP>
+```
+
+Horno no se dispara desde esta integración.

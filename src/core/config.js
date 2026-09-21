@@ -37,5 +37,7 @@ module.exports = Object.freeze({
   gatewayUrl: String(process.env.MRAPI_GATEWAY_URL || "").replace(/\/$/, ""),
   gatewayApiKey: String(process.env.MRAPI_GATEWAY_API_KEY || "").trim(),
   gatewaySecret: String(process.env.MRAPI_GATEWAY_SECRET || "").trim(),
-  gatewayTenantId: String(process.env.MRAPI_GATEWAY_TENANT_ID || tenantId).trim()
+  gatewayTenantId: String(process.env.MRAPI_GATEWAY_TENANT_ID || tenantId).trim(),
+  whatsappNotifyBaseUrl: String(process.env.MRAPI_WHATSAPP_BASE_URL || "https://mrapi-wp-604957912671.us-central1.run.app").replace(/\/$/, ""),
+  whatsappNotifySystemToken: String(process.env.MRAPI_WHATSAPP_SYSTEM_TOKEN || "").trim()
 });

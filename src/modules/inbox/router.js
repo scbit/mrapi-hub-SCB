@@ -16,6 +16,7 @@ const { authRequired } = require("../../middleware/auth");
 const router = express.Router();
 const FieldValue = admin.firestore.FieldValue;
 const { PIPELINE_STAGES } = require("../crm/constants");
+const {TARGET_STAGE,sendCotizadoAlert}=require("../crm/cotizado-alert");
 const { visibleOwners, canSeeOwner, isAdminLike } = require("../crm/access");
 
 const { markRecontactResponse } = require("../crm/recovery-service");
@@ -667,7 +668,9 @@ router.post("/conversations/:id/deal",authRequired,async(req,res)=>{
     if(contactRef){await contactRef.set({name:cleanString(req.body?.name||c.contactName||c.profileName||c.waFrom,180),phone:cleanString(c.waFrom,80),company:cleanString(c.companyName,180),email:"",owner,source:"MRAPI_HUB",hubConversationId:id,createdAt:now,updatedAt:now});writes++;}
     await dealRef.set(dealData);writes++;
     await ref.set({contactId,dealId:dealRef.id,ownerEmail:owner,stage,crmLinked:true,isAssigned:Boolean(owner),updatedAt:FieldValue.serverTimestamp()},{merge:true});writes++;
-    return res.json({ok:true,dealId:dealRef.id,contactId,readsEstimate:1,writesEstimate:writes});
+    let whatsappAlert={ok:true,skipped:true,reason:"created_outside_cotizado_para_enviar"};
+    if(stage===TARGET_STAGE)whatsappAlert=await sendCotizadoAlert(dealRef.id,dealData);
+    return res.json({ok:true,dealId:dealRef.id,contactId,readsEstimate:1,writesEstimate:writes,whatsappAlert});
   }catch(e){return res.status(e.status||500).json({ok:false,error:e.message});}
 });
 

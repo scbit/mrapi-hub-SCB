@@ -8,6 +8,7 @@ const config=require("../../core/config");
 const {PIPELINE_STAGES,DEAL_TYPES,DEAL_TYPE_LABELS,LEAD_QUALITY_VALUES,LEAD_QUALITY_LABELS}=require("./constants");
 const {visibleOwners,canSeeOwner,canEditOwner,isAdminLike}=require("./access");
 const {searchDealsIndexed,searchContactsIndexed,buildSearchTerms}=require("./search-index");
+const {TARGET_STAGE,sendCotizadoAlert}=require("./cotizado-alert");
 const router=express.Router();
 router.use(authRequired);
 
@@ -204,11 +205,16 @@ router.put("/deals/:id",async(req,res)=>{
     if(Object.prototype.hasOwnProperty.call(p,"title"))p.searchTerms=buildSearchTerms({...old,...p});
     await ref.update(p);
     let writes=1;
+    let whatsappAlert={ok:true,skipped:true,reason:"not_entering_cotizado_para_enviar"};
+    if(Object.prototype.hasOwnProperty.call(p,"stage")&&p.stage===TARGET_STAGE&&String(old.stage||"").trim()!==TARGET_STAGE){
+      // El cambio del trato ya quedó guardado. Una falla de WhatsApp nunca revierte el CRM.
+      whatsappAlert=await sendCotizadoAlert(req.params.id,{...old,...p});
+    }
     if(notesChanged&&String(p.notes||"").trim()){
       await ref.collection("notes").add({note:String(p.notes||"").trim(),user:String(req.authUser.email||req.authUser.name||"crm"),createdAt:admin.firestore.FieldValue.serverTimestamp()});
       writes++;
     }
-    return res.json({ok:true,readsEstimate:1,writesEstimate:writes});
+    return res.json({ok:true,readsEstimate:1,writesEstimate:writes,whatsappAlert});
   }catch(e){res.status(500).json({ok:false,error:e.message});}
 });
 

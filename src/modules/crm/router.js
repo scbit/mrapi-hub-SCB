@@ -7,7 +7,7 @@ const crypto=require("crypto");
 const config=require("../../core/config");
 const {PIPELINE_STAGES,DEAL_TYPES,DEAL_TYPE_LABELS,LEAD_QUALITY_VALUES,LEAD_QUALITY_LABELS}=require("./constants");
 const {visibleOwners,canSeeOwner,canEditOwner,isAdminLike}=require("./access");
-const {ensureDealSearchIndex,searchDealsIndexed,searchContactsIndexed,buildSearchTerms}=require("./search-index");
+const {searchDealsIndexed,searchContactsIndexed,buildSearchTerms}=require("./search-index");
 const router=express.Router();
 router.use(authRequired);
 
@@ -325,9 +325,10 @@ router.get("/lookup",async(req,res)=>{
       }
     }
 
-    // Índice global persistente. La primera vez hace un backfill único; después cada búsqueda
-    // lee sólo candidatos del término en lugar de recorrer miles de tratos.
-    const idx=await ensureDealSearchIndex();reads+=idx.reads||0;writes+=idx.writes||0;
+    // Búsqueda global rápida sobre el índice persistente ya creado.
+    // IMPORTANTE: nunca reconstruir/backfillear el índice dentro de una búsqueda interactiva,
+    // porque puede dejar al usuario esperando y disparar miles de reads.
+    const idx={rebuild:false};
     const [foundDeals,foundContacts]=await Promise.all([searchDealsIndexed(term,50),searchContactsIndexed(term,50)]);
     reads+=foundDeals.reads+foundContacts.reads;
     for(const d of foundDeals.docs)await add("deal",d);

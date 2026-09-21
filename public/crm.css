@@ -145,3 +145,9 @@ body{background:var(--scb-bg);color:var(--scb-ink)}
 .bulkDivider{width:1px;height:28px;background:#e1e5eb;margin:0 2px}
 #bulkOwner{min-width:220px}
 @media(max-width:850px){.bulkDivider{display:none}#bulkOwner{min-width:0;flex:1 1 170px}}
+
+
+/* v1.5.55 — búsqueda global de CRM */
+.lookup-results{background:#fff;border:1px solid #dfe3ea;border-radius:12px;padding:10px;box-shadow:0 8px 24px rgba(16,24,40,.08);margin:8px 0 12px;max-width:720px}
+.lookup-results-head{display:flex;gap:10px;align-items:center;margin-bottom:8px;color:#344054}.lookup-results-head span{color:#667085;font-size:12px}
+.lookup-result{width:100%;display:flex;flex-direction:column;align-items:flex-start;gap:3px;text-align:left;border:0;border-top:1px solid #eef0f3;background:#fff;padding:10px 8px;cursor:pointer}.lookup-result:first-of-type{border-top:0}.lookup-result:hover{background:#f8fafc}.lookup-result strong{color:#101828;font-size:13px}.lookup-result span{color:#667085;font-size:12px}

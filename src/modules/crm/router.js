@@ -7,6 +7,7 @@ const crypto=require("crypto");
 const config=require("../../core/config");
 const {PIPELINE_STAGES,DEAL_TYPES,DEAL_TYPE_LABELS,LEAD_QUALITY_VALUES,LEAD_QUALITY_LABELS}=require("./constants");
 const {visibleOwners,canSeeOwner,canEditOwner,isAdminLike}=require("./access");
+const {ensureDealSearchIndex,searchDealsIndexed,buildSearchTerms}=require("./search-index");
 const router=express.Router();
 router.use(authRequired);
 
@@ -200,6 +201,7 @@ router.put("/deals/:id",async(req,res)=>{
     if(p.stage&&!PIPELINE_STAGES.includes(p.stage))return res.status(400).json({ok:false,error:"Etapa inválida"});if(p.dealType&&!DEAL_TYPES.includes(p.dealType))return res.status(400).json({ok:false,error:"Tipo inválido"});if(p.leadQuality&&!LEAD_QUALITY_VALUES.includes(p.leadQuality))return res.status(400).json({ok:false,error:"Calidad inválida"});if(Object.prototype.hasOwnProperty.call(p,"value"))p.value=Number(p.value||0);
     if(p.owner&&!(await canSeeOwner(req.authUser,p.owner)))return res.status(403).json({ok:false,error:"No podés asignar ese owner"});
     const notesChanged=Object.prototype.hasOwnProperty.call(p,"notes")&&String(p.notes||"").trim()!==String(old.notes||"").trim();
+    if(Object.prototype.hasOwnProperty.call(p,"title"))p.searchTerms=buildSearchTerms({...old,...p});
     await ref.update(p);
     let writes=1;
     if(notesChanged&&String(p.notes||"").trim()){
@@ -288,16 +290,66 @@ router.put("/contacts/:id",async(req,res)=>{
 });
 
 router.get("/lookup",async(req,res)=>{
-  try{const term=String(req.query.q||"").trim();if(!term)return res.json({ok:true,items:[],readsEstimate:0});let reads=0,items=[];
-    // Búsqueda dirigida: IDs o teléfono exacto. Nunca collection scan.
-    const [dealDoc,contactDoc]=await Promise.all([crmDb.collection("deals").doc(term).get(),crmDb.collection("contacts").doc(term).get()]);reads+=2;
-    if(dealDoc.exists&&await canSeeOwner(req.authUser,(dealDoc.data()||{}).owner))items.push({kind:"deal",...normalizeDoc(dealDoc)});
-    if(contactDoc.exists&&await canSeeOwner(req.authUser,(contactDoc.data()||{}).owner))items.push({kind:"contact",...normalizeDoc(contactDoc)});
-    if(!items.length&&/^[+\d ()-]{7,}$/.test(term)){
-      const variants=Array.from(new Set([term,term.replace(/\D/g,""),"+"+term.replace(/\D/g,"")].filter(Boolean))).slice(0,3);
-      for(const phone of variants){const s=await crmDb.collection("contacts").where("phone","==",phone).limit(10).get();reads+=s.size;for(const d of s.docs)if(await canSeeOwner(req.authUser,(d.data()||{}).owner))items.push({kind:"contact",...normalizeDoc(d)});if(items.length)break;}
+  try{
+    const term=String(req.query.q||"").trim();
+    if(!term)return res.json({ok:true,items:[],readsEstimate:0});
+    const qLower=term.toLocaleLowerCase("es");
+    const qDigits=term.replace(/\D/g,"");
+    const looksPhone=qDigits.length>=7;
+    let reads=0,writes=0;
+    const items=[];
+    const seen=new Set();
+    const add=async(kind,doc)=>{
+      if(!doc?.exists)return;
+      const data=doc.data()||{};
+      if(!(await canSeeOwner(req.authUser,data.owner)))return;
+      const key=`${kind}:${doc.id}`;
+      if(seen.has(key))return;
+      seen.add(key);
+      items.push({kind,...normalizeDoc(doc)});
+    };
+
+    // IDs exactos: 2 reads como máximo.
+    const [dealDoc,contactDoc]=await Promise.all([
+      crmDb.collection("deals").doc(term).get(),
+      crmDb.collection("contacts").doc(term).get()
+    ]);
+    reads+=2;await add("deal",dealDoc);await add("contact",contactDoc);
+
+    // Teléfono exacto en contactos: consultas acotadas, sin scan global.
+    if(looksPhone){
+      const variants=Array.from(new Set([term,qDigits,"+"+qDigits].filter(Boolean))).slice(0,3);
+      for(const phone of variants){
+        const snap=await crmDb.collection("contacts").where("phone","==",phone).limit(30).get();
+        reads+=snap.size;for(const d of snap.docs)await add("contact",d);
+      }
     }
-    res.json({ok:true,items,readsEstimate:reads,note:"La búsqueda global por nombre se materializará en índice propio; no se escanea contacts/deals."});
-  }catch(e){res.status(500).json({ok:false,error:e.message});}
+
+    // Índice global persistente. La primera vez hace un backfill único; después cada búsqueda
+    // lee sólo candidatos del término en lugar de recorrer miles de tratos.
+    const idx=await ensureDealSearchIndex();reads+=idx.reads||0;writes+=idx.writes||0;
+    const found=await searchDealsIndexed(term,50);reads+=found.reads;
+    for(const d of found.docs)await add("deal",d);
+
+    // Si encontramos contactos por teléfono, traer sus tratos vinculados.
+    const contactIds=items.filter(x=>x.kind==="contact").map(x=>x.id);
+    for(let i=0;i<contactIds.length;i+=30){
+      const chunk=contactIds.slice(i,i+30);if(!chunk.length)continue;
+      const snap=await crmDb.collection("deals").where("contactId","in",chunk).limit(50).get();
+      reads+=snap.size;for(const d of snap.docs)await add("deal",d);
+    }
+
+    items.sort((a,b)=>{
+      const aExact=String(a.title||a.name||"").toLocaleLowerCase("es")===qLower?1:0;
+      const bExact=String(b.title||b.name||"").toLocaleLowerCase("es")===qLower?1:0;
+      if(aExact!==bExact)return bExact-aExact;
+      return (a.kind==="deal"?-1:1)-(b.kind==="deal"?-1:1);
+    });
+    return res.json({ok:true,items:items.slice(0,50),readsEstimate:reads,writesEstimate:writes,indexRebuilt:!!idx.rebuild});
+  }catch(e){
+    console.error("crm lookup",e);
+    return res.status(500).json({ok:false,error:e.message});
+  }
 });
+
 module.exports=router;

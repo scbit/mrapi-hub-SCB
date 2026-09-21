@@ -7,6 +7,7 @@ const {LEAD_QUALITY_VALUES}=require("./constants");
 const router=express.Router();
 router.use(authRequired);
 const STATUS_STAGES=["Seguimiento","Marca personal","Esperando PI","Para cotizar","Cotizado para enviar","Horno"];
+const MY_STATUS_ACTIVE_STAGES=["Nuevos Prospectos",...STATUS_STAGES];
 function cleanOwner(v){return String(v||"").trim().toLowerCase();}
 function normalizeRole(v){const x=String(v||"").trim().toLowerCase();return ["admin","backoffice","team_leader","field_sales"].includes(x)?x:"field_sales";}
 function todayBA(){const parts=new Intl.DateTimeFormat("en-CA",{timeZone:"America/Argentina/Buenos_Aires",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(new Date());const m={};for(const p of parts)if(p.type!=="literal")m[p.type]=p.value;return `${m.year}-${m.month}-${m.day}`;}
@@ -123,7 +124,7 @@ router.get("/my-status/deals",async(req,res)=>{try{
       out.sort((a,b)=>tsMillis(b.createdAt)-tsMillis(a.createdAt));
     }else{
       if(stage)out=out.filter(x=>String(x.stage||"").trim()===stage);
-      if(overdue)out=out.filter(x=>{const d=String(x.dueDate||"").trim();return !!d&&d<today;});
+      if(overdue)out=out.filter(x=>{const d=String(x.dueDate||"").trim(),st=String(x.stage||"").trim();return !!d&&d<today&&MY_STATUS_ACTIVE_STAGES.includes(st);});
       if(overdue)out.sort((a,b)=>String(a.dueDate||"").localeCompare(String(b.dueDate||"")));
       else out.sort((a,b)=>tsMillis(b.updatedAt)-tsMillis(a.updatedAt));
     }
@@ -141,8 +142,10 @@ router.get("/my-status/deals",async(req,res)=>{try{
       q=q.orderBy("createdAt","desc");
     }else{
       if(stage)q=q.where("stage","==",stage);
-      if(overdue)q=q.where("dueDate","<",today).orderBy("dueDate","asc");
-      else q=q.orderBy("updatedAt","desc");
+      if(overdue){
+        if(!stage)q=q.where("stage","in",MY_STATUS_ACTIVE_STAGES);
+        q=q.where("dueDate","<",today).orderBy("dueDate","asc");
+      }else q=q.orderBy("updatedAt","desc");
     }
     // Para paginar sin offset de Firestore (que cobra los saltados), pedimos solo hasta lo necesario.
     const need=Math.min(550,offset+limit+1);

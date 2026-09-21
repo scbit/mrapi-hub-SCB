@@ -271,6 +271,46 @@ async function processBotInbound({conversationId,convoRef,from,to,body,inboundSi
     return {ok:false,error:error?.message||"Dialogflow error",fallbackHuman:true};
   }
 }
+
+function chunkValues(values,size=30){
+  const out=[];
+  for(let i=0;i<values.length;i+=size)out.push(values.slice(i,i+size));
+  return out;
+}
+function ownerFilterValues(req,visible){
+  const requested=uniqueStrings(String(req.query.owners||"").split(",").map(x=>String(x||"").trim().toLowerCase())).filter(Boolean);
+  if(visible!==null && requested.some(x=>!visible.includes(x))){const e=new Error("Owner fuera de tus permisos");e.status=403;throw e;}
+  if(requested.length)return requested;
+  return Array.isArray(visible)?visible.slice():[];
+}
+async function conversationDocsByOwners({owners,limit,cursorDoc,sinceDate}){
+  const base=inboxDb.collection("conversations");
+  const groups=owners.length?chunkValues(owners,30):[null];
+  const snaps=await Promise.all(groups.map(async group=>{
+    let q=base;
+    if(group?.length===1)q=q.where("ownerEmail","==",group[0]);
+    else if(group?.length>1)q=q.where("ownerEmail","in",group);
+    if(sinceDate)q=q.where("lastMessageAt",">=",sinceDate);
+    q=q.orderBy("lastMessageAt","desc");
+    if(cursorDoc)q=q.startAfter(cursorDoc);
+    q=q.limit(limit);
+    return q.get();
+  }));
+  const docs=[]; const seen=new Set(); let reads=0; let anyFull=false;
+  for(const snap of snaps){
+    reads+=snap.size; if(snap.size===limit)anyFull=true;
+    for(const d of snap.docs)if(!seen.has(d.id)){seen.add(d.id);docs.push(d);}
+  }
+  docs.sort((a,b)=>{
+    const av=(a.data()||{}).lastMessageAt, bv=(b.data()||{}).lastMessageAt;
+    const am=av?.toMillis?av.toMillis():new Date(av||0).getTime();
+    const bm=bv?.toMillis?bv.toMillis():new Date(bv||0).getTime();
+    if(bm!==am)return bm-am;
+    return b.id.localeCompare(a.id);
+  });
+  return {docs:docs.slice(0,limit),reads,hasMore:anyFull||docs.length>limit};
+}
+
 function summary(doc){
   const d = doc.data() || {};
   return {
@@ -448,32 +488,21 @@ router.get("/conversations", authRequired, async(req,res)=>{
   try{
     const requested=Number(req.query.limit||config.inboxPageSize);
     const limit=Math.max(10,Math.min(requested,config.inboxMaxPageSize));
-    const requestedOwners=uniqueStrings(String(req.query.owners||"").split(",").map(x=>String(x||"").toLowerCase())).slice(0,10);
     const visible=await visibleOwners(req.authUser);
-    let owners=requestedOwners;
-    if(visible!==null){
-      if(owners.some(x=>!visible.includes(x))) return res.status(403).json({ok:false,error:"Owner fuera de tus permisos"});
-      if(!owners.length){
-        const own=String(req.authUser?.email||"").trim().toLowerCase();
-        owners=visible.length>10?(own&&visible.includes(own)?[own]:visible.slice(0,10)):visible.slice(0,10);
-      }
-    }
-    let q=inboxDb.collection("conversations");
-    if(owners.length===1) q=q.where("ownerEmail","==",owners[0]);
-    else if(owners.length>1) q=q.where("ownerEmail","in",owners);
-    q=q.orderBy("lastMessageAt","desc").limit(limit);
+    const owners=ownerFilterValues(req,visible);
     const cursor=cleanString(req.query.cursor,220);
-    let cursorRead=0;
+    let cursorDoc=null,cursorRead=0;
     if(cursor){
       const c=await inboxDb.collection("conversations").doc(cursor).get(); cursorRead=1;
-      if(c.exists) q=q.startAfter(c);
+      if(c.exists)cursorDoc=c;
     }
-    const snap=await q.get();
-    const items=snap.docs.map(summary);
-    const last=snap.docs[snap.docs.length-1];
-    return res.json({ok:true,items,nextCursor:last?.id||null,hasMore:snap.size===limit,readsEstimate:snap.size+cursorRead,ownersApplied:owners});
+    const loaded=await conversationDocsByOwners({owners,limit,cursorDoc});
+    const items=loaded.docs.map(summary);
+    const last=loaded.docs[loaded.docs.length-1];
+    return res.json({ok:true,items,nextCursor:last?.id||null,hasMore:loaded.hasMore,readsEstimate:loaded.reads+cursorRead,ownersApplied:owners});
   }catch(e){
     console.error("inbox list",e);
+    if(e.status===403)return res.status(403).json({ok:false,error:e.message});
     const msg=/index/i.test(String(e.message||""))?"Firestore requiere un índice para este filtro de owner. No se hizo fallback masivo.":e.message;
     return res.status(500).json({ok:false,error:msg});
   }
@@ -485,28 +514,18 @@ router.get("/conversations/changes", authRequired, async(req,res)=>{
     const sinceRaw=cleanString(req.query.since,80);
     const sinceDate=new Date(sinceRaw);
     if(!sinceRaw || Number.isNaN(sinceDate.getTime())) return res.status(400).json({ok:false,error:"Checkpoint inválido"});
-    const requestedOwners=uniqueStrings(String(req.query.owners||"").split(",").map(x=>String(x||"").toLowerCase())).slice(0,10);
     const visible=await visibleOwners(req.authUser);
-    let owners=requestedOwners;
-    if(visible!==null){
-      if(owners.some(x=>!visible.includes(x))) return res.status(403).json({ok:false,error:"Owner fuera de tus permisos"});
-      if(!owners.length){
-        const own=String(req.authUser?.email||"").trim().toLowerCase();
-        owners=visible.length>10?(own&&visible.includes(own)?[own]:visible.slice(0,10)):visible.slice(0,10);
-      }
-    }
-    let q=inboxDb.collection("conversations");
-    if(owners.length===1) q=q.where("ownerEmail","==",owners[0]);
-    else if(owners.length>1) q=q.where("ownerEmail","in",owners);
-    q=q.where("lastMessageAt",">=",sinceDate).orderBy("lastMessageAt","desc").limit(100);
-    const snap=await q.get();
-    return res.json({ok:true,items:snap.docs.map(summary),readsEstimate:snap.size,serverNow:new Date().toISOString(),ownersApplied:owners});
+    const owners=ownerFilterValues(req,visible);
+    const loaded=await conversationDocsByOwners({owners,limit:100,sinceDate});
+    return res.json({ok:true,items:loaded.docs.map(summary),readsEstimate:loaded.reads,serverNow:new Date().toISOString(),ownersApplied:owners});
   }catch(e){
     console.error("inbox changes",e);
+    if(e.status===403)return res.status(403).json({ok:false,error:e.message});
     const msg=/index/i.test(String(e.message||""))?"Firestore requiere un índice para Inbox Live con este filtro de owner. No se hizo scan masivo.":e.message;
     return res.status(500).json({ok:false,error:msg});
   }
 });
+
 
 router.get("/conversations/search",authRequired,async(req,res)=>{
   try{

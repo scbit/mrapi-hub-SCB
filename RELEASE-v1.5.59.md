@@ -1,4 +1,4 @@
-# MRAPI Hub v1.5.59
+# MRAPI Hub v1.5.60
 
 - Corrige la regresión de búsqueda global del CRM.
 - La búsqueda vuelve a consultar inmediatamente el índice existente: no ejecuta rebuild/backfill dentro del request interactivo.

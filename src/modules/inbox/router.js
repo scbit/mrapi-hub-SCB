@@ -574,15 +574,51 @@ router.get("/conversations/search",authRequired,async(req,res)=>{
   }catch(e){ console.error("inbox search",e); return res.status(500).json({ok:false,error:e.message}); }
 });
 
+async function resolveConversationSnapshot(rawId){
+  const requested=cleanString(rawId,220);
+  if(!requested) return {snap:null,reads:0};
+  const readable=requested.match(/^(\d{6,20})__(\d{6,20})$/);
+  if(!readable){
+    const snap=await inboxDb.collection("conversations").doc(requested).get();
+    return {snap:snap.exists?snap:null,reads:1};
+  }
+
+  const customer=digits(readable[1]);
+  const line=digits(readable[2]);
+  let reads=0;
+
+  // Fast path for current Gateway/Twilio conversations.
+  const deterministicId=deterministicConversationId(customer,line);
+  const direct=await inboxDb.collection("conversations").doc(deterministicId).get();
+  reads++;
+  if(direct.exists) return {snap:direct,reads};
+
+  // Compatibility path for legacy conversations whose internal id was created
+  // differently. Keep the public URL stable as customer__line and resolve it
+  // using indexed customer fields, then verify the line in memory.
+  const variants=uniqueStrings([customer,`+${customer}`,`whatsapp:+${customer}`,`whatsapp:${customer}`]);
+  for(const field of ["waFrom","customerPhone","phone","from","contactPhone"]){
+    try{
+      const q=await inboxDb.collection("conversations").where(field,"in",variants.slice(0,10)).limit(25).get();
+      reads+=q.size;
+      const found=q.docs.find(doc=>{
+        const d=doc.data()||{};
+        return conversationCustomerPhone(d,doc.id)===customer && digits(conversationLine(d,doc.id))===line;
+      });
+      if(found) return {snap:found,reads};
+    }catch(e){
+      console.warn("resolve readable conversation",field,e.message||String(e));
+    }
+  }
+  return {snap:null,reads};
+}
+
 router.get("/conversations/:id",authRequired,async(req,res)=>{
   try{
-    let id=cleanString(decodeURIComponent(req.params.id||""),220);if(!id)return res.status(400).json({ok:false,error:"Conversación inválida"});
-    // Shareable URL alias: <contactPhone>__<linePhone>. Internally we continue using
-    // the deterministic hashed Firestore conversation id.
-    const readable=id.match(/^(\d{6,20})__(\d{6,20})$/);
-    if(readable) id=deterministicConversationId(readable[1],readable[2]);
-    const snap=await inboxDb.collection("conversations").doc(id).get();if(!snap.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
-    return res.json({ok:true,item:summary(snap),readsEstimate:1});
+    const id=cleanString(decodeURIComponent(req.params.id||""),220);if(!id)return res.status(400).json({ok:false,error:"Conversación inválida"});
+    const resolved=await resolveConversationSnapshot(id);
+    if(!resolved.snap)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
+    return res.json({ok:true,item:summary(resolved.snap),readsEstimate:resolved.reads});
   }catch(e){return res.status(500).json({ok:false,error:e.message});}
 });
 

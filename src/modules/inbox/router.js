@@ -25,6 +25,37 @@ function iso(v) {
   catch { return null; }
 }
 function digits(v){ return String(v || "").replace(/\D/g, ""); }
+
+function timestampMs(v){
+  try{
+    if(!v) return 0;
+    if(typeof v.toMillis==="function") return v.toMillis();
+    if(typeof v.toDate==="function") return v.toDate().getTime();
+    const ms=new Date(v).getTime();
+    return Number.isFinite(ms)?ms:0;
+  }catch{return 0;}
+}
+function customerWindowInfo(conversation={}, provider=""){
+  const resolved=String(provider||conversation.provider||"").toLowerCase();
+  const lastInboundMs=timestampMs(conversation.lastInboundMessageAt);
+  if(resolved!=="meta") return {provider:resolved||"twilio",customerWindowOpen:true,customerWindowExpiresAt:null,lastInboundMessageAt:iso(conversation.lastInboundMessageAt)};
+  const expiresMs=lastInboundMs ? lastInboundMs + 24*60*60*1000 : 0;
+  return {
+    provider:"meta",
+    customerWindowOpen:Boolean(expiresMs && Date.now()<expiresMs),
+    customerWindowExpiresAt:expiresMs?new Date(expiresMs).toISOString():null,
+    lastInboundMessageAt:iso(conversation.lastInboundMessageAt)
+  };
+}
+function assertCustomerWindow(conversation={}, route={}){
+  if(String(route.provider||"").toLowerCase()!=="meta") return;
+  const info=customerWindowInfo(conversation,"meta");
+  if(info.customerWindowOpen) return;
+  const e=new Error("La ventana de 24 h de WhatsApp está cerrada. Usá una plantilla aprobada para volver a contactar al cliente.");
+  e.status=409;
+  e.code="WHATSAPP_24H_WINDOW_CLOSED";
+  throw e;
+}
 function cleanString(v, max=500){ return String(v || "").trim().slice(0,max); }
 function uniqueStrings(values){ return [...new Set((values || []).map(v=>cleanString(v,220)).filter(Boolean))]; }
 function base64UrlEncode(value){ return Buffer.from(String(value),"utf8").toString("base64url"); }
@@ -331,6 +362,10 @@ function summary(doc){
     isLinked: Boolean(String(d.dealId || "").trim() || String(d.contactId || "").trim()),
     stage: d.stage || d.dealStage || "nuevo",
     mode: String(d.mode || "BOT").toUpperCase() === "HUMAN" ? "HUMAN" : "BOT",
+    provider: String(d.provider || "").toLowerCase(),
+    lastInboundMessageAt: customerWindowInfo(d,d.provider).lastInboundMessageAt,
+    customerWindowOpen: customerWindowInfo(d,d.provider).customerWindowOpen,
+    customerWindowExpiresAt: customerWindowInfo(d,d.provider).customerWindowExpiresAt,
     lastMessage: d.lastMessagePreview || d.lastMessage || d.lastMessageText || "",
     lastMessageAt: iso(d.lastMessageAt || d.updatedAt),
     unreadCount: Number(d.unreadCount || 0),
@@ -835,18 +870,19 @@ router.get("/templates",authRequired,async(req,res)=>{
         if(route.catalog?.gatewayLineName) repair.gatewayLineName=cleanString(route.catalog.gatewayLineName,120);
         if(route.catalog?.phoneNumberId) repair.phoneNumberId=cleanString(route.catalog.phoneNumberId,120);
         await c.ref.set(repair,{merge:true});
-        return res.json({ok:true,templates,readsEstimate:1+route.reads,provider:"meta",lineId:route.from,gatewayLineId:route.gatewayLineId,lineLabel:repair.lineLabel||repair.gatewayLineName||""});
+        const windowInfo=customerWindowInfo(c.data,"meta");
+        return res.json({ok:true,templates,readsEstimate:1+route.reads,provider:"meta",lineId:route.from,gatewayLineId:route.gatewayLineId,lineLabel:repair.lineLabel||repair.gatewayLineName||"",...windowInfo});
       }
     }
     const templates=await wa.listApprovedTemplates();
-    return res.json({ok:true,templates,readsEstimate:0,provider:"twilio"});
+    return res.json({ok:true,templates,readsEstimate:0,provider:"twilio",customerWindowOpen:true,customerWindowExpiresAt:null});
   }catch(e){console.error("templates failed",JSON.stringify({conversationId,error:e?.message||String(e),status:e?.response?.status||null,data:e?.response?.data||null}));return res.status(500).json({ok:false,error:e.message});}
 });
 
 router.post("/conversations/:id/send",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const text=cleanString(req.body?.text,4000); if(!text) return res.status(400).json({ok:false,error:"Falta el mensaje"});
-    const c=await loadConversationForSend(id); const route=await resolveOutboundRoute(c.data); const from=route.from; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
+    const c=await loadConversationForSend(id); const route=await resolveOutboundRoute(c.data); assertCustomerWindow(c.data,route); const from=route.from; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const sent=route.provider==="meta"
       ? await wa.sendGatewayText({tenantId:route.gatewayTenantId,lineId:route.gatewayLineId,to,body:text})
       : await wa.sendText({from,to,body:text,req,conversationId:id});
@@ -859,7 +895,7 @@ router.post("/conversations/:id/send-file",authRequired,async(req,res)=>{
   try{
     if(!String(req.headers["content-type"]||"").toLowerCase().includes("multipart/form-data")) return res.status(400).json({ok:false,error:"Content-Type inválido"});
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const parsed=await parseSingleUpload(req); if(!parsed.text&&!parsed.file) return res.status(400).json({ok:false,error:"Falta texto o archivo"});
-    const c=await loadConversationForSend(id); const route=await resolveOutboundRoute(c.data); const from=route.from; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
+    const c=await loadConversationForSend(id); const route=await resolveOutboundRoute(c.data); assertCustomerWindow(c.data,route); const from=route.from; const to=c.data.waFrom; if(!from||!to) return res.status(400).json({ok:false,error:"Falta línea o teléfono del contacto"});
     const media=parsed.file ? [await uploadOutbound(parsed.file)] : [];
     let sent;
     if(route.provider==="meta"){

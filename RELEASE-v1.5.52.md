@@ -1,4 +1,4 @@
-# MRAPI Hub v1.5.52
+# MRAPI Hub v1.5.53
 
 ## Bandeja
 - `Nuevos / sin asignar` ahora muestra únicamente conversaciones sin `contactId` y sin `dealId`.

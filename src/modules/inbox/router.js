@@ -731,12 +731,24 @@ router.get("/conversations/:id/crm-summary",authRequired,async(req,res)=>{
     const convos=resolved.snaps, mergedConvo=resolved.item;let reads=resolved.reads,deal=null,contact=null,deals=[];
     let contactIds=uniqueStrings(convos.flatMap(doc=>{const x=doc.data()||{};return [x.contactId,...(Array.isArray(x.contactIds)?x.contactIds:[])];}));
     const explicitDealIds=uniqueStrings(convos.flatMap(doc=>{const x=doc.data()||{};return [x.dealId,...(Array.isArray(x.dealIds)?x.dealIds:[])];}));
+    const customerPhone=digits(resolved.customer||mergedConvo.waFrom||mergedConvo.phone||"");
+    const samePhone=(a,b)=>{a=digits(a);b=digits(b);return !!a&&!!b&&(a===b||a.endsWith(b)||b.endsWith(a));};
+
+    // Validate legacy contact links before trusting them. Some old conversations keep a
+    // stale contactId from migrations; that used to prevent the phone fallback from running.
+    if(contactIds.length&&customerPhone.length>=7){
+      const valid=[];
+      for(const chunk of chunkValues(contactIds,30)){
+        const cs=await crmDb.collection("contacts").where(admin.firestore.FieldPath.documentId(),"in",chunk).get();reads+=cs.size;
+        for(const d of cs.docs){const x=d.data()||{},p=digits(x.phone||x.whatsapp||x.mobile||"");if(!p||samePhone(p,customerPhone))valid.push(d.id);}
+      }
+      contactIds=uniqueStrings(valid);
+    }
 
     // Legacy self-heal: many old conversations never stored contactId/dealId even though
     // CRM has a contact with the same WhatsApp number. Resolve using the normalized
     // customer phone so whatsapp:+549... / +549... / 549... all map to the same contact.
     if(!contactIds.length){
-      const customerPhone=digits(resolved.customer||mergedConvo.waFrom||mergedConvo.phone||"");
       if(customerPhone.length>=7){
         try{
           // Fast exact legacy recovery. Old CRM records often predate searchTerms, so an
@@ -814,11 +826,36 @@ router.get("/conversations/:id/crm-summary",authRequired,async(req,res)=>{
     for(const chunk of chunkValues(explicitDealIds,30)){
       if(!chunk.length)continue;
       const ds=await crmDb.collection("deals").where(admin.firestore.FieldPath.documentId(),"in",chunk).get();reads+=ds.size;
-      for(const d of ds.docs)dealMap.set(d.id,crmDealItem(d,cleanString((d.data()||{}).contactId,220)));
+      for(const d of ds.docs){
+        const x=d.data()||{},cid=cleanString(x.contactId,220),dp=digits(x.contactPhone||x.phone||"");
+        if(customerPhone&&dp&&!samePhone(dp,customerPhone)&&(!cid||!contactIds.includes(cid)))continue;
+        dealMap.set(d.id,crmDealItem(d,cid));
+      }
     }
     for(const contactId of contactIds.slice(0,20)){
       const ds=await crmDb.collection("deals").where("contactId","==",contactId).limit(100).get();reads+=ds.size;
       for(const d of ds.docs)dealMap.set(d.id,crmDealItem(d,contactId));
+    }
+
+    // If the stored links are stale/incomplete, use the exact same indexed phone path that
+    // powers CRM global search. This is the authoritative recovery path for old deals.
+    if(!dealMap.size&&customerPhone.length>=7){
+      const found=await searchDealsIndexed(customerPhone,100);reads+=found.reads||0;
+      for(const d of found.docs){
+        const x=d.data()||{},dp=digits(x.contactPhone||x.phone||"");
+        if(dp&&!samePhone(dp,customerPhone))continue;
+        const cid=cleanString(x.contactId,220);
+        if(cid)contactIds=uniqueStrings([...contactIds,cid]);
+        dealMap.set(d.id,crmDealItem(d,cid));
+      }
+      if(!dealMap.size){
+        const variants=uniqueStrings([customerPhone,`+${customerPhone}`,`whatsapp:+${customerPhone}`,`whatsapp:${customerPhone}`]);
+        for(const chunk of chunkValues(variants,10)){
+          const ds=await crmDb.collection("deals").where("contactPhone","in",chunk).limit(100).get();reads+=ds.size;
+          for(const d of ds.docs){const x=d.data()||{};if(!samePhone(x.contactPhone||x.phone,customerPhone))continue;const cid=cleanString(x.contactId,220);if(cid)contactIds=uniqueStrings([...contactIds,cid]);dealMap.set(d.id,crmDealItem(d,cid));}
+          if(dealMap.size)break;
+        }
+      }
     }
     deals=[...dealMap.values()].sort((a,b)=>String(b.updatedAt||b.createdAt||"").localeCompare(String(a.updatedAt||a.createdAt||"")));
     const preferredDealIds=uniqueStrings(convos.map(doc=>cleanString((doc.data()||{}).dealId,220)));

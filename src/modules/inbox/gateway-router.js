@@ -16,6 +16,11 @@ function deterministicConversationId(from,to){
   const key=`${digits(from)}|${digits(to)}`;
   return `wa_${crypto.createHash("sha256").update(key).digest("hex").slice(0,40)}`;
 }
+function effectiveMode(conversation={}){
+  const manual=String(conversation.manualModeOverride||"").toUpperCase();
+  if(manual==="HUMAN"||manual==="BOT") return manual;
+  return String(conversation.mode||"BOT").toUpperCase()==="HUMAN"?"HUMAN":"BOT";
+}
 function preview(text,type){
   const t=clean(text,180);
   if(t)return t;
@@ -40,7 +45,7 @@ async function processGatewayBotInbound({conversationId,convoRef,from,body,inbou
     const detected=await dialogflow.detectIntent({conversationId,text:body});
     if(!detected.text) return {ok:true,skipped:true,reason:"empty_agent_response"};
     const latest=await convoRef.get();
-    if(!latest.exists || String((latest.data()||{}).mode||"BOT").toUpperCase()!=="BOT") return {ok:true,skipped:true,reason:"mode_changed_to_human"};
+    if(!latest.exists || effectiveMode(latest.data()||{})!=="BOT") return {ok:true,skipped:true,reason:"mode_changed_to_human"};
     const sent=await wa.sendGatewayText({tenantId:event.tenantId,lineId:event.lineId,to:from,body:detected.text});
     const now=FieldValue.serverTimestamp();
     await convoRef.collection("messages").doc(String(sent.sid)).set({
@@ -168,7 +173,7 @@ router.post("/events",async(req,res)=>{
         sourceChannel:referral.has?"meta_ad":(priorSource==="meta_ad"?"meta_ad":(existing.sourceChannel||"whatsapp"))
       };
       Object.keys(patch).forEach(k=>patch[k]===undefined&&delete patch[k]);
-      const currentMode=convoSnap.exists?String(existing.mode||"BOT").toUpperCase():(dialogflow.configured()?"BOT":"HUMAN");
+      const currentMode=convoSnap.exists?effectiveMode(existing):(dialogflow.configured()?"BOT":"HUMAN");
       shouldBot=currentMode==="BOT";
       isNewConversation=!convoSnap.exists;
       if(!convoSnap.exists){patch.createdAt=now;patch.mode=currentMode;patch.stage="nuevo";patch.ownerEmail="";patch.isAssigned=false;patch.isLinked=false;}

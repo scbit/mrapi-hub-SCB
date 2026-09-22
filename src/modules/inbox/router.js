@@ -288,7 +288,7 @@ async function processBotInbound({conversationId,convoRef,from,to,body,inboundSi
     if(!detected.text) return {ok:true,skipped:true,reason:"empty_agent_response"};
     // A human may take over while Dialogflow is processing. Never send if mode changed.
     const latest=await convoRef.get();
-    if(!latest.exists || normalizeMode((latest.data()||{}).mode)!=="BOT") return {ok:true,skipped:true,reason:"mode_changed_to_human"};
+    if(!latest.exists || effectiveMode(latest.data()||{})!=="BOT") return {ok:true,skipped:true,reason:"mode_changed_to_human"};
     const sent=await wa.sendText({from:to,to:from,body:detected.text,conversationId,req:{protocol:"https",get:()=>""}});
     const now=FieldValue.serverTimestamp();
     await convoRef.collection("messages").doc(String(sent.sid)).set({
@@ -365,7 +365,8 @@ function summary(doc){
     isAssigned: Boolean(String(d.ownerEmail || "").trim()),
     isLinked: Boolean(String(d.dealId || "").trim() || String(d.contactId || "").trim() || (Array.isArray(d.dealIds)&&d.dealIds.length) || (Array.isArray(d.contactIds)&&d.contactIds.length)),
     stage: d.stage || d.dealStage || "nuevo",
-    mode: String(d.mode || "BOT").toUpperCase() === "HUMAN" ? "HUMAN" : "BOT",
+    mode: effectiveMode(d),
+    manualModeOverride: String(d.manualModeOverride||"").toUpperCase(),
     provider: String(d.provider || "").toLowerCase(),
     lastInboundMessageAt: customerWindowInfo(d,d.provider).lastInboundMessageAt,
     customerWindowOpen: customerWindowInfo(d,d.provider).customerWindowOpen,
@@ -411,7 +412,7 @@ function mergeConversationSummaries(items=[]){
   const groups=new Map();
   for(const item of items){
     if(!item) continue;
-    // v1.5.75: no depender de waFrom. Los chats legacy pueden guardar el
+    // v1.5.76: no depender de waFrom. Los chats legacy pueden guardar el
     // cliente en from/customerPhone/phone/contactPhone. summary() ya normaliza
     // esos campos en customerPhone/canonicalLinePhone.
     const customer=digits(item.customerPhone||"");
@@ -433,7 +434,10 @@ function mergeConversationSummaries(items=[]){
     for(const field of ["contactName","companyName","waFrom","inboundTo","lineId","preferredLineId","lineLabel","ownerEmail","provider","sourceChannel","leadPlatform","leadOriginType","leadOriginMessage","leadOriginAt","leadOriginCtwaClid","leadOriginAdId","leadOriginSourceType","leadOriginHeadline","leadOriginBody","leadOriginImageUrl","leadOriginSourceUrl","referralCtwaClid","referralAdId","referralSourceType","referralHeadline","referralBody","referralImageUrl","campaignName","adsetName"]) merged[field]=first(field);
     merged.lastMessage=latest.lastMessage||merged.lastMessage||"";
     merged.lastMessageAt=latest.lastMessageAt||merged.lastMessageAt||null;
-    merged.mode=latest.mode||merged.mode||"BOT";
+    const manualHuman=rows.some(x=>String(x.manualModeOverride||"").toUpperCase()==="HUMAN");
+    const manualBot=rows.some(x=>String(x.manualModeOverride||"").toUpperCase()==="BOT");
+    merged.manualModeOverride=manualHuman?"HUMAN":(manualBot?"BOT":"");
+    merged.mode=manualHuman?"HUMAN":(manualBot?"BOT":(latest.mode||merged.mode||"BOT"));
     const dealRow=rows.find(x=>String(x.dealId||"").trim()||(Array.isArray(x.dealIds)&&x.dealIds.length));
     merged.stage=dealRow?.stage||"";
     merged.lastDeliveryStatus=latest.lastDeliveryStatus||merged.lastDeliveryStatus||"";
@@ -494,6 +498,11 @@ function message(doc, conversationId){
 
 
 function normalizeMode(v){ return String(v||"BOT").toUpperCase()==="HUMAN" ? "HUMAN" : "BOT"; }
+function effectiveMode(conversation={}){
+  const manual=String(conversation.manualModeOverride||"").toUpperCase();
+  if(manual==="HUMAN"||manual==="BOT") return manual;
+  return normalizeMode(conversation.mode);
+}
 function preview(text, mediaCount=0){ const t=cleanString(text,160).replace(/\s+/g," "); return t || (mediaCount ? `Adjunto (${mediaCount})` : ""); }
 async function saveOutbound(convoRef, sid, payload){ await convoRef.collection("messages").doc(String(sid)).set(payload,{merge:true}); }
 async function loadConversationForSend(id){
@@ -760,7 +769,7 @@ router.get("/conversations/:id/crm-summary",authRequired,async(req,res)=>{
       }
     }
 
-    // v1.5.75: muchos tratos legacy no dejaron dealId/contactId en la conversación,
+    // v1.5.76: muchos tratos legacy no dejaron dealId/contactId en la conversación,
     // pero SÍ conservan hubConversationId en el propio deal. Es exactamente el valor
     // que usa "Ir al HUB" desde CRM. Usamos esa relación inversa antes de cualquier
     // búsqueda por teléfono para recuperar el trato original sin adivinar formatos.
@@ -1042,8 +1051,19 @@ router.post("/conversations/:id/mode",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);
     const mode=String(req.body?.mode||"").toUpperCase()==="HUMAN" ? "HUMAN" : "BOT";
-    await inboxDb.collection("conversations").doc(id).set({mode,modeUpdatedAt:FieldValue.serverTimestamp(),modeUpdatedBy:req.authUser.email||req.authUser.id},{merge:true});
-    return res.json({ok:true,mode,writesEstimate:1});
+    const resolved=await resolveConversationGroup(id);
+    const refs=(resolved.snaps||[]).map(s=>s.ref);
+    if(!refs.length) refs.push(inboxDb.collection("conversations").doc(id));
+    const patch={
+      mode,
+      manualModeOverride:mode,
+      modeUpdatedAt:FieldValue.serverTimestamp(),
+      modeUpdatedBy:req.authUser.email||req.authUser.id
+    };
+    const batch=inboxDb.batch();
+    refs.forEach(ref=>batch.set(ref,patch,{merge:true}));
+    await batch.commit();
+    return res.json({ok:true,mode,writesEstimate:refs.length,relatedConversations:refs.length});
   }catch(e){ console.error("inbox mode",e); return res.status(500).json({ok:false,error:e.message}); }
 });
 
@@ -1214,7 +1234,7 @@ router.post("/twilio/inbound",async(req,res)=>{
         sourceChannel:referral.has?"meta_ad":(priorSource==="meta_ad"?"meta_ad":(existingConvo.sourceChannel||"whatsapp"))
       };
       Object.keys(patch).forEach(k=>patch[k]===undefined&&delete patch[k]);
-      const currentMode=convoSnap.exists ? normalizeMode(existingConvo.mode) : (dialogflow.configured()?"BOT":"HUMAN");
+      const currentMode=convoSnap.exists ? effectiveMode(existingConvo) : (dialogflow.configured()?"BOT":"HUMAN");
       shouldBot=currentMode==="BOT";
       isNewConversation=!convoSnap.exists;
       if(!convoSnap.exists){

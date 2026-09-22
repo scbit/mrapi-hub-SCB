@@ -397,6 +397,8 @@ function summary(doc){
     leadAd: d.leadAd && typeof d.leadAd === "object" ? d.leadAd : null,
     duplicateConversationIds: uniqueStrings(d.duplicateConversationIds || []),
     relatedConversationIds: [doc.id],
+    customerPhone: conversationCustomerPhone(d,doc.id),
+    canonicalLinePhone: digits(conversationLine(d,doc.id)),
     conversationKey: `${conversationCustomerPhone(d,doc.id)}__${digits(conversationLine(d,doc.id))}`
   };
 }
@@ -409,8 +411,11 @@ function mergeConversationSummaries(items=[]){
   const groups=new Map();
   for(const item of items){
     if(!item) continue;
-    const customer=digits(item.waFrom||"");
-    const line=digits(item.lineId||item.inboundTo||"");
+    // v1.5.75: no depender de waFrom. Los chats legacy pueden guardar el
+    // cliente en from/customerPhone/phone/contactPhone. summary() ya normaliza
+    // esos campos en customerPhone/canonicalLinePhone.
+    const customer=digits(item.customerPhone||"");
+    const line=digits(item.canonicalLinePhone||item.lineId||item.inboundTo||"");
     const key=(customer&&line)?`${customer}__${line}`:`id:${item.id}`;
     if(!groups.has(key))groups.set(key,[]);
     groups.get(key).push(item);
@@ -753,6 +758,28 @@ router.get("/conversations/:id/crm-summary",authRequired,async(req,res)=>{
         dealMap.set(d.id,item);
         if(item.contactId)contactIds=uniqueStrings([...contactIds,item.contactId]);
       }
+    }
+
+    // v1.5.75: muchos tratos legacy no dejaron dealId/contactId en la conversación,
+    // pero SÍ conservan hubConversationId en el propio deal. Es exactamente el valor
+    // que usa "Ir al HUB" desde CRM. Usamos esa relación inversa antes de cualquier
+    // búsqueda por teléfono para recuperar el trato original sin adivinar formatos.
+    const hubConversationIds=uniqueStrings([
+      id,
+      ...convos.map(d=>d.id),
+      ...(Array.isArray(mergedConvo.relatedConversationIds)?mergedConvo.relatedConversationIds:[]),
+      ...(Array.isArray(mergedConvo.duplicateConversationIds)?mergedConvo.duplicateConversationIds:[])
+    ]).slice(0,90);
+    for(const chunk of chunkValues(hubConversationIds,30)){
+      if(!chunk.length)continue;
+      try{
+        const ds=await crmDb.collection("deals").where("hubConversationId","in",chunk).limit(100).get();reads+=ds.size;
+        for(const d of ds.docs){
+          const item=crmDealItem(d,"");
+          dealMap.set(d.id,item);
+          if(item.contactId)contactIds=uniqueStrings([...contactIds,item.contactId]);
+        }
+      }catch(e){console.warn("crm-summary hubConversationId fallback",e.message||String(e));}
     }
 
     // 2) Un contacto puede tener muchos tratos. Aunque contacts esté vacío, los

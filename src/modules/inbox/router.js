@@ -728,162 +728,60 @@ router.get("/conversations/:id/crm-summary",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);if(!id)return res.status(400).json({ok:false,error:"Conversación inválida"});
     const resolved=await resolveConversationGroup(id);if(!resolved.item)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
-    const convos=resolved.snaps, mergedConvo=resolved.item;let reads=resolved.reads,deal=null,contact=null,deals=[];
+    const convos=resolved.snaps, mergedConvo=resolved.item;let reads=resolved.reads,deal=null,contact=null;
+
+    // v1.5.73: restaurar la fuente de verdad legacy que funcionaba antes de los
+    // fallbacks por teléfono. En SCB existen muchos deals cuyo contactId es válido
+    // aunque la colección contacts no tenga el documento correspondiente. Por eso
+    // NO invalidamos contactId/dealId verificando contacts. Primero confiamos en los
+    // vínculos CRM ya guardados en cualquiera de los aliases físicos del mismo chat.
     let contactIds=uniqueStrings(convos.flatMap(doc=>{const x=doc.data()||{};return [x.contactId,...(Array.isArray(x.contactIds)?x.contactIds:[])];}));
     const explicitDealIds=uniqueStrings(convos.flatMap(doc=>{const x=doc.data()||{};return [x.dealId,...(Array.isArray(x.dealIds)?x.dealIds:[])];}));
-    const customerPhone=digits(resolved.customer||mergedConvo.waFrom||mergedConvo.phone||"");
-    const samePhone=(a,b)=>{a=digits(a);b=digits(b);return !!a&&!!b&&(a===b||a.endsWith(b)||b.endsWith(a));};
-
-    // Validate legacy contact links before trusting them. Some old conversations keep a
-    // stale contactId from migrations; that used to prevent the phone fallback from running.
-    if(contactIds.length&&customerPhone.length>=7){
-      const valid=[];
-      for(const chunk of chunkValues(contactIds,30)){
-        const cs=await crmDb.collection("contacts").where(admin.firestore.FieldPath.documentId(),"in",chunk).get();reads+=cs.size;
-        for(const d of cs.docs){const x=d.data()||{},p=digits(x.phone||x.whatsapp||x.mobile||"");if(!p||samePhone(p,customerPhone))valid.push(d.id);}
-      }
-      contactIds=uniqueStrings(valid);
-    }
-
-    // Legacy self-heal: many old conversations never stored contactId/dealId even though
-    // CRM has a contact with the same WhatsApp number. Resolve using the normalized
-    // customer phone so whatsapp:+549... / +549... / 549... all map to the same contact.
-    if(!contactIds.length){
-      if(customerPhone.length>=7){
-        try{
-          // Fast exact legacy recovery. Old CRM records often predate searchTerms, so an
-          // indexed-only lookup can miss a perfectly valid contact/deal. Query the common
-          // stored phone variants first (very low read cost), then fall back to the index.
-          const phoneVariants=uniqueStrings([customerPhone,`+${customerPhone}`,`whatsapp:+${customerPhone}`,`whatsapp:${customerPhone}`]);
-          let exactContact=null;
-
-          // IMPORTANT: CRM and Bandeja must resolve legacy phones with the same search logic.
-          // The indexed lookup supports normalized/suffix phone matching and is the same path
-          // used by the global CRM search. This avoids depending on the raw Firestore type or
-          // exact formatting of old contact.phone/contactPhone values.
-          const indexedDeals=await searchDealsIndexed(customerPhone,100);reads+=indexedDeals.reads||0;
-          for(const d of indexedDeals.docs){
-            const x=d.data()||{};
-            const phone=digits(x.contactPhone||x.phone||"");
-            if(!phone || !(phone===customerPhone || phone.endsWith(customerPhone) || customerPhone.endsWith(phone))) continue;
-            const cid=cleanString(x.contactId,220);
-            if(cid)contactIds=uniqueStrings([...contactIds,cid]);
-            if(!explicitDealIds.includes(d.id))explicitDealIds.push(d.id);
-          }
-
-          const indexedContacts=await searchContactsIndexed(customerPhone,50);reads+=indexedContacts.reads||0;
-          exactContact=indexedContacts.docs.find(d=>{
-            const phone=digits((d.data()||{}).phone);
-            return phone && (phone===customerPhone || phone.endsWith(customerPhone) || customerPhone.endsWith(phone));
-          })||null;
-
-          // Exact raw-value fallback for records that predate the search index. Include both
-          // string and numeric representations because some historical imports stored phones
-          // as numbers instead of strings.
-          if(!exactContact && phoneVariants.length){
-            const rawVariants=[...phoneVariants];
-            if(customerPhone.length<=15){
-              const numeric=Number(customerPhone);
-              if(Number.isSafeInteger(numeric))rawVariants.push(numeric);
-            }
-            for(const chunk of chunkValues(rawVariants,10)){
-              const cs=await crmDb.collection("contacts").where("phone","in",chunk).limit(20).get();reads+=cs.size;
-              exactContact=cs.docs.find(d=>digits((d.data()||{}).phone)===customerPhone)||null;
-              if(exactContact)break;
-            }
-          }
-
-          // Same raw fallback for deals. This also recovers the relationship when the contact
-          // document itself is incomplete but the legacy deal still carries contactPhone.
-          if(phoneVariants.length && !explicitDealIds.length){
-            const rawVariants=[...phoneVariants];
-            if(customerPhone.length<=15){
-              const numeric=Number(customerPhone);
-              if(Number.isSafeInteger(numeric))rawVariants.push(numeric);
-            }
-            for(const chunk of chunkValues(rawVariants,10)){
-              const ds=await crmDb.collection("deals").where("contactPhone","in",chunk).limit(50).get();reads+=ds.size;
-              for(const d of ds.docs){
-                const x=d.data()||{};
-                if(digits(x.contactPhone)!==customerPhone)continue;
-                const cid=cleanString(x.contactId,220);
-                if(cid)contactIds=uniqueStrings([...contactIds,cid]);
-                if(!explicitDealIds.includes(d.id))explicitDealIds.push(d.id);
-              }
-              if(explicitDealIds.length)break;
-            }
-          }
-          if(exactContact){
-            const x=exactContact.data()||{};
-            contactIds=uniqueStrings([exactContact.id,...contactIds]);
-            contact={id:exactContact.id,name:x.name||x.fullName||mergedConvo.contactName||"",company:x.company||x.companyName||mergedConvo.companyName||"",phone:x.phone||mergedConvo.waFrom||"",email:x.email||"",owner:x.owner||mergedConvo.ownerEmail||"",city:x.city||x.location||""};
-          }
-        }catch(e){console.warn("crm-summary phone fallback",e.message||String(e));}
-      }
-    }
-
     const dealMap=new Map();
+
+    // 1) Deal IDs explícitos del chat/aliases: máxima prioridad.
     for(const chunk of chunkValues(explicitDealIds,30)){
       if(!chunk.length)continue;
       const ds=await crmDb.collection("deals").where(admin.firestore.FieldPath.documentId(),"in",chunk).get();reads+=ds.size;
       for(const d of ds.docs){
-        const x=d.data()||{},cid=cleanString(x.contactId,220),dp=digits(x.contactPhone||x.phone||"");
-        if(customerPhone&&dp&&!samePhone(dp,customerPhone)&&(!cid||!contactIds.includes(cid)))continue;
-        dealMap.set(d.id,crmDealItem(d,cid));
+        const item=crmDealItem(d,"");
+        dealMap.set(d.id,item);
+        if(item.contactId)contactIds=uniqueStrings([...contactIds,item.contactId]);
       }
     }
-    for(const contactId of contactIds.slice(0,20)){
+
+    // 2) Un contacto puede tener muchos tratos. Aunque contacts esté vacío, los
+    // deals siguen vinculados por contactId, así que consultamos deals directamente.
+    for(const contactId of contactIds.slice(0,30)){
       const ds=await crmDb.collection("deals").where("contactId","==",contactId).limit(100).get();reads+=ds.size;
       for(const d of ds.docs)dealMap.set(d.id,crmDealItem(d,contactId));
     }
 
-    // If the stored links are stale/incomplete, use the exact same indexed phone path that
-    // powers CRM global search. This is the authoritative recovery path for old deals.
-    if(!dealMap.size&&customerPhone.length>=7){
-      const found=await searchDealsIndexed(customerPhone,100);reads+=found.reads||0;
-      for(const d of found.docs){
-        const x=d.data()||{},dp=digits(x.contactPhone||x.phone||"");
-        if(dp&&!samePhone(dp,customerPhone))continue;
-        const cid=cleanString(x.contactId,220);
-        if(cid)contactIds=uniqueStrings([...contactIds,cid]);
-        dealMap.set(d.id,crmDealItem(d,cid));
+    let deals=[...dealMap.values()].sort((a,b)=>String(b.updatedAt||b.createdAt||"").localeCompare(String(a.updatedAt||a.createdAt||"")));
+    deal=explicitDealIds.map(x=>dealMap.get(x)).find(Boolean)||deals[0]||null;
+
+    // 3) Sólo si el chat realmente no trae ningún vínculo legacy, usar el índice
+    // global como fallback. Nunca reemplaza ni invalida IDs ya guardados.
+    if(!deals.length){
+      const customerPhone=digits(resolved.customer||mergedConvo.waFrom||mergedConvo.phone||"");
+      if(customerPhone.length>=7){
+        try{
+          const found=await searchDealsIndexed(customerPhone,100);reads+=found.reads||0;
+          for(const d of found.docs){const item=crmDealItem(d,"");dealMap.set(d.id,item);if(item.contactId)contactIds=uniqueStrings([...contactIds,item.contactId]);}
+          deals=[...dealMap.values()].sort((a,b)=>String(b.updatedAt||b.createdAt||"").localeCompare(String(a.updatedAt||a.createdAt||"")));
+          deal=deals[0]||null;
+        }catch(e){console.warn("crm-summary indexed fallback",e.message||String(e));}
       }
-      if(!dealMap.size){
-        const variants=uniqueStrings([customerPhone,`+${customerPhone}`,`whatsapp:+${customerPhone}`,`whatsapp:${customerPhone}`]);
-        for(const chunk of chunkValues(variants,10)){
-          const ds=await crmDb.collection("deals").where("contactPhone","in",chunk).limit(100).get();reads+=ds.size;
-          for(const d of ds.docs){const x=d.data()||{};if(!samePhone(x.contactPhone||x.phone,customerPhone))continue;const cid=cleanString(x.contactId,220);if(cid)contactIds=uniqueStrings([...contactIds,cid]);dealMap.set(d.id,crmDealItem(d,cid));}
-          if(dealMap.size)break;
-        }
-      }
-    }
-    deals=[...dealMap.values()].sort((a,b)=>String(b.updatedAt||b.createdAt||"").localeCompare(String(a.updatedAt||a.createdAt||"")));
-    const preferredDealIds=uniqueStrings(convos.map(doc=>cleanString((doc.data()||{}).dealId,220)));
-    deal=preferredDealIds.map(x=>dealMap.get(x)).find(Boolean)||deals[0]||null;
-    const preferredContactId=cleanString(deal?.contactId||contactIds[0],220);
-    if(preferredContactId && !contact){
-      const d=await crmDb.collection("contacts").doc(preferredContactId).get();reads++;if(d.exists){const x=d.data()||{};contact={id:d.id,name:x.name||x.fullName||mergedConvo.contactName||"",company:x.company||x.companyName||mergedConvo.companyName||"",phone:x.phone||mergedConvo.waFrom||"",email:x.email||"",owner:x.owner||deal?.owner||mergedConvo.ownerEmail||"",city:x.city||x.location||""};}
     }
 
-    // When we recover a legacy CRM relationship by phone, persist it back on every
-    // physical conversation alias so list filters and future opens are consistent.
-    if(preferredContactId && convos.length){
-      const dealIds=deals.map(x=>x.id).filter(Boolean);
-      const batch=inboxDb.batch();let writes=0;
-      for(const doc of convos){
-        const current=doc.data()||{};
-        const hasContact=uniqueStrings([current.contactId,...(Array.isArray(current.contactIds)?current.contactIds:[])]).includes(preferredContactId);
-        const currentDealIds=uniqueStrings([current.dealId,...(Array.isArray(current.dealIds)?current.dealIds:[])]);
-        const missingDeal=dealIds.some(x=>!currentDealIds.includes(x));
-        if(!hasContact||missingDeal){
-          const patch={contactId:current.contactId||preferredContactId,contactIds:FieldValue.arrayUnion(preferredContactId),crmLinked:true,updatedAt:FieldValue.serverTimestamp()};
-          if(dealIds.length)patch.dealIds=FieldValue.arrayUnion(...dealIds);
-          if(!current.dealId&&dealIds[0])patch.dealId=dealIds[0];
-          batch.set(doc.ref,patch,{merge:true});writes++;
-        }
-      }
-      if(writes){await batch.commit();}
+    // El documento contacts es opcional en datos legacy de SCB. Si existe, lo mostramos;
+    // si no, igual devolvemos los deals y el lateral CRM sigue funcionando.
+    const preferredContactId=cleanString(deal?.contactId||contactIds[0],220);
+    if(preferredContactId){
+      const d=await crmDb.collection("contacts").doc(preferredContactId).get();reads++;
+      if(d.exists){const x=d.data()||{};contact={id:d.id,name:x.name||x.fullName||mergedConvo.contactName||"",company:x.company||x.companyName||mergedConvo.companyName||"",phone:x.phone||mergedConvo.waFrom||"",email:x.email||"",owner:x.owner||deal?.owner||mergedConvo.ownerEmail||"",city:x.city||x.location||""};}
     }
+
     return res.json({ok:true,deal,deals,contact,stages:PIPELINE_STAGES,conversationKey:mergedConvo.conversationKey,relatedConversationIds:mergedConvo.relatedConversationIds||[],readsEstimate:reads});
   }catch(e){console.error("inbox crm-summary",e);return res.status(500).json({ok:false,error:e.message});}
 });

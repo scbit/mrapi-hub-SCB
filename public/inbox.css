@@ -440,3 +440,5 @@ body{
 
 
 .deliveryState{font-weight:800}.deliveryPending{color:#8a6d1d}.deliverySent{color:#667085}.deliveryDelivered{color:#2f6f44}.deliveryRead{color:#1f7a3d}.deliveryFailed{color:#b42318}.deliveryError{margin-top:4px;font-size:12px;line-height:1.35;color:#b42318;font-weight:700}
+/* v1.5.64 - un chat por cliente+linea, multiples tratos por contacto */
+.crmDealPicker{margin-bottom:10px}.crmDealPicker select{font-weight:700}.crmDealTopActions{display:flex;justify-content:flex-end;margin:-2px 0 8px}.crmDealTopActions .btn{padding:8px 10px;font-size:12px}

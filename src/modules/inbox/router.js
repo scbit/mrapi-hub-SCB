@@ -625,16 +625,26 @@ router.get("/conversations/:id",authRequired,async(req,res)=>{
   }catch(e){return res.status(500).json({ok:false,error:e.message});}
 });
 
+function crmDealItem(doc,fallbackContactId=""){
+  const x=doc.data()||{};
+  return {id:doc.id,title:x.title||x.name||"",stage:x.stage||"",owner:x.owner||"",dealType:x.dealType||"",leadQuality:x.leadQuality||"",value:Number(x.value||0),dueDate:iso(x.dueDate),notes:x.notes||"",contactId:x.contactId||fallbackContactId,hubConversationId:x.hubConversationId||"",createdAt:iso(x.createdAt),updatedAt:iso(x.updatedAt),files:Array.isArray(x.files)?x.files.map(f=>({id:f?.id||"",name:f?.name||f?.filename||"",mimeType:f?.mimeType||f?.contentType||""})):[]};
+}
+
 router.get("/conversations/:id/crm-summary",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);if(!id)return res.status(400).json({ok:false,error:"Conversación inválida"});
-    const convo=await inboxDb.collection("conversations").doc(id).get();if(!convo.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
-    const c=convo.data()||{};let reads=1,deal=null,contact=null;
-    const dealId=cleanString(c.dealId,220),contactId=cleanString(c.contactId,220);
-    if(dealId){const d=await crmDb.collection("deals").doc(dealId).get();reads++;if(d.exists){const x=d.data()||{};deal={id:d.id,title:x.title||x.name||"",stage:x.stage||"",owner:x.owner||"",dealType:x.dealType||"",leadQuality:x.leadQuality||"",value:Number(x.value||0),dueDate:iso(x.dueDate),notes:x.notes||"",contactId:x.contactId||contactId,files:Array.isArray(x.files)?x.files.map(f=>({id:f?.id||"",name:f?.name||f?.filename||"",mimeType:f?.mimeType||f?.contentType||""})):[]};}}
-    const resolvedContactId=cleanString(deal?.contactId||contactId,220);
-    if(resolvedContactId){const d=await crmDb.collection("contacts").doc(resolvedContactId).get();reads++;if(d.exists){const x=d.data()||{};contact={id:d.id,name:x.name||x.fullName||c.contactName||"",company:x.company||x.companyName||c.companyName||"",phone:x.phone||c.waFrom||"",email:x.email||"",owner:x.owner||deal?.owner||c.ownerEmail||"",city:x.city||x.location||""};}}
-    return res.json({ok:true,deal,contact,stages:PIPELINE_STAGES,readsEstimate:reads});
+    const resolved=await resolveConversationSnapshot(id);if(!resolved.snap)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
+    const convo=resolved.snap,c=convo.data()||{};let reads=resolved.reads,deal=null,contact=null,deals=[];
+    const preferredDealId=cleanString(c.dealId,220);let contactId=cleanString(c.contactId,220);
+    if(preferredDealId){const d=await crmDb.collection("deals").doc(preferredDealId).get();reads++;if(d.exists){deal=crmDealItem(d,contactId);contactId=cleanString(deal.contactId||contactId,220);}}
+    if(contactId){
+      const ds=await crmDb.collection("deals").where("contactId","==",contactId).limit(100).get();reads+=ds.size;
+      deals=ds.docs.map(d=>crmDealItem(d,contactId)).sort((a,b)=>String(b.updatedAt||b.createdAt||"").localeCompare(String(a.updatedAt||a.createdAt||"")));
+      if(deal && !deals.some(x=>x.id===deal.id))deals.unshift(deal);
+      if(!deal)deal=deals[0]||null;
+      const d=await crmDb.collection("contacts").doc(contactId).get();reads++;if(d.exists){const x=d.data()||{};contact={id:d.id,name:x.name||x.fullName||c.contactName||"",company:x.company||x.companyName||c.companyName||"",phone:x.phone||c.waFrom||"",email:x.email||"",owner:x.owner||deal?.owner||c.ownerEmail||"",city:x.city||x.location||""};}
+    }
+    return res.json({ok:true,deal,deals,contact,stages:PIPELINE_STAGES,conversationKey:`${conversationCustomerPhone(c,convo.id)}__${digits(conversationLine(c,convo.id))}`,readsEstimate:reads});
   }catch(e){console.error("inbox crm-summary",e);return res.status(500).json({ok:false,error:e.message});}
 });
 
@@ -662,14 +672,15 @@ router.post("/conversations/:id/deal",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const ref=inboxDb.collection("conversations").doc(id); const snap=await ref.get();
     if(!snap.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"}); const c=snap.data()||{};
-    if(c.dealId)return res.json({ok:true,dealId:String(c.dealId),contactId:String(c.contactId||""),existing:true,readsEstimate:1,writesEstimate:0});
     const owner=await chooseOwner(req.authUser,req.body?.owner,c.ownerEmail); const now=FieldValue.serverTimestamp(); let contactId=cleanString(c.contactId,220); let contactRef=null; let writes=0;
     if(!contactId){contactRef=crmDb.collection("contacts").doc();contactId=contactRef.id;}
     const dealRef=crmDb.collection("deals").doc(); const stage=PIPELINE_STAGES.includes(req.body?.stage)?req.body.stage:"Nuevos Prospectos";
     const dealData={title:cleanString(req.body?.title||c.contactName||c.companyName||c.waFrom||"Nuevo trato",180),contactId,owner,stage,dealType:"",leadQuality:"",value:0,notes:"",hubConversationId:id,createdAt:now,updatedAt:now};
     if(contactRef){await contactRef.set({name:cleanString(req.body?.name||c.contactName||c.profileName||c.waFrom,180),phone:cleanString(c.waFrom,80),company:cleanString(c.companyName,180),email:"",owner,source:"MRAPI_HUB",hubConversationId:id,createdAt:now,updatedAt:now});writes++;}
     await dealRef.set(dealData);writes++;
-    await ref.set({contactId,dealId:dealRef.id,ownerEmail:owner,stage,crmLinked:true,isAssigned:Boolean(owner),updatedAt:FieldValue.serverTimestamp()},{merge:true});writes++;
+    const convoPatch={contactId,dealIds:FieldValue.arrayUnion(dealRef.id),ownerEmail:owner,crmLinked:true,isAssigned:Boolean(owner),updatedAt:FieldValue.serverTimestamp()};
+    if(!cleanString(c.dealId,220)){convoPatch.dealId=dealRef.id;convoPatch.stage=stage;}
+    await ref.set(convoPatch,{merge:true});writes++;
     let whatsappAlert={ok:true,skipped:true,reason:"created_outside_cotizado_para_enviar"};
     if(stage===TARGET_STAGE)whatsappAlert=await sendCotizadoAlert(dealRef.id,dealData);
     return res.json({ok:true,dealId:dealRef.id,contactId,readsEstimate:1,writesEstimate:writes,whatsappAlert});

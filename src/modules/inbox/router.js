@@ -18,7 +18,7 @@ const FieldValue = admin.firestore.FieldValue;
 const { PIPELINE_STAGES } = require("../crm/constants");
 const {TARGET_STAGE,sendCotizadoAlert}=require("../crm/cotizado-alert");
 const { visibleOwners, canSeeOwner, isAdminLike } = require("../crm/access");
-const { searchContactsIndexed } = require("../crm/search-index");
+const { searchContactsIndexed, searchDealsIndexed } = require("../crm/search-index");
 
 const { markRecontactResponse } = require("../crm/recovery-service");
 
@@ -744,25 +744,62 @@ router.get("/conversations/:id/crm-summary",authRequired,async(req,res)=>{
           // stored phone variants first (very low read cost), then fall back to the index.
           const phoneVariants=uniqueStrings([customerPhone,`+${customerPhone}`,`whatsapp:+${customerPhone}`,`whatsapp:${customerPhone}`]);
           let exactContact=null;
-          if(phoneVariants.length){
-            const cs=await crmDb.collection("contacts").where("phone","in",phoneVariants.slice(0,10)).limit(10).get();reads+=cs.size;
-            exactContact=cs.docs.find(d=>digits((d.data()||{}).phone)===customerPhone)||null;
+
+          // IMPORTANT: CRM and Bandeja must resolve legacy phones with the same search logic.
+          // The indexed lookup supports normalized/suffix phone matching and is the same path
+          // used by the global CRM search. This avoids depending on the raw Firestore type or
+          // exact formatting of old contact.phone/contactPhone values.
+          const indexedDeals=await searchDealsIndexed(customerPhone,100);reads+=indexedDeals.reads||0;
+          for(const d of indexedDeals.docs){
+            const x=d.data()||{};
+            const phone=digits(x.contactPhone||x.phone||"");
+            if(!phone || !(phone===customerPhone || phone.endsWith(customerPhone) || customerPhone.endsWith(phone))) continue;
+            const cid=cleanString(x.contactId,220);
+            if(cid)contactIds=uniqueStrings([...contactIds,cid]);
+            if(!explicitDealIds.includes(d.id))explicitDealIds.push(d.id);
           }
-          // A legacy deal may know the phone even when its contact document has no search
-          // index. Recover contactId/dealId directly from the deal in that case.
-          if(phoneVariants.length){
-            const ds=await crmDb.collection("deals").where("contactPhone","in",phoneVariants.slice(0,10)).limit(50).get();reads+=ds.size;
-            for(const d of ds.docs){
-              const x=d.data()||{};
-              if(digits(x.contactPhone)!==customerPhone)continue;
-              const cid=cleanString(x.contactId,220);
-              if(cid)contactIds=uniqueStrings([...contactIds,cid]);
-              if(!explicitDealIds.includes(d.id))explicitDealIds.push(d.id);
+
+          const indexedContacts=await searchContactsIndexed(customerPhone,50);reads+=indexedContacts.reads||0;
+          exactContact=indexedContacts.docs.find(d=>{
+            const phone=digits((d.data()||{}).phone);
+            return phone && (phone===customerPhone || phone.endsWith(customerPhone) || customerPhone.endsWith(phone));
+          })||null;
+
+          // Exact raw-value fallback for records that predate the search index. Include both
+          // string and numeric representations because some historical imports stored phones
+          // as numbers instead of strings.
+          if(!exactContact && phoneVariants.length){
+            const rawVariants=[...phoneVariants];
+            if(customerPhone.length<=15){
+              const numeric=Number(customerPhone);
+              if(Number.isSafeInteger(numeric))rawVariants.push(numeric);
+            }
+            for(const chunk of chunkValues(rawVariants,10)){
+              const cs=await crmDb.collection("contacts").where("phone","in",chunk).limit(20).get();reads+=cs.size;
+              exactContact=cs.docs.find(d=>digits((d.data()||{}).phone)===customerPhone)||null;
+              if(exactContact)break;
             }
           }
-          if(!exactContact){
-            const found=await searchContactsIndexed(customerPhone,25);reads+=found.reads||0;
-            exactContact=found.docs.find(d=>digits((d.data()||{}).phone)===customerPhone)||null;
+
+          // Same raw fallback for deals. This also recovers the relationship when the contact
+          // document itself is incomplete but the legacy deal still carries contactPhone.
+          if(phoneVariants.length && !explicitDealIds.length){
+            const rawVariants=[...phoneVariants];
+            if(customerPhone.length<=15){
+              const numeric=Number(customerPhone);
+              if(Number.isSafeInteger(numeric))rawVariants.push(numeric);
+            }
+            for(const chunk of chunkValues(rawVariants,10)){
+              const ds=await crmDb.collection("deals").where("contactPhone","in",chunk).limit(50).get();reads+=ds.size;
+              for(const d of ds.docs){
+                const x=d.data()||{};
+                if(digits(x.contactPhone)!==customerPhone)continue;
+                const cid=cleanString(x.contactId,220);
+                if(cid)contactIds=uniqueStrings([...contactIds,cid]);
+                if(!explicitDealIds.includes(d.id))explicitDealIds.push(d.id);
+              }
+              if(explicitDealIds.length)break;
+            }
           }
           if(exactContact){
             const x=exactContact.data()||{};

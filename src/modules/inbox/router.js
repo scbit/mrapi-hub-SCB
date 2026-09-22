@@ -363,7 +363,7 @@ function summary(doc){
     lineCount: Math.max(1, canonicalLines([d.lineId||d.inboundTo||"", ...(d.linkedLineIds || [])]).length),
     ownerEmail: String(d.ownerEmail || "").toLowerCase(),
     isAssigned: Boolean(String(d.ownerEmail || "").trim()),
-    isLinked: Boolean(String(d.dealId || "").trim() || String(d.contactId || "").trim()),
+    isLinked: Boolean(String(d.dealId || "").trim() || String(d.contactId || "").trim() || (Array.isArray(d.dealIds)&&d.dealIds.length) || (Array.isArray(d.contactIds)&&d.contactIds.length)),
     stage: d.stage || d.dealStage || "nuevo",
     mode: String(d.mode || "BOT").toUpperCase() === "HUMAN" ? "HUMAN" : "BOT",
     provider: String(d.provider || "").toLowerCase(),
@@ -429,7 +429,8 @@ function mergeConversationSummaries(items=[]){
     merged.lastMessage=latest.lastMessage||merged.lastMessage||"";
     merged.lastMessageAt=latest.lastMessageAt||merged.lastMessageAt||null;
     merged.mode=latest.mode||merged.mode||"BOT";
-    merged.stage=latest.stage||merged.stage||"nuevo";
+    const dealRow=rows.find(x=>String(x.dealId||"").trim()||(Array.isArray(x.dealIds)&&x.dealIds.length));
+    merged.stage=dealRow?.stage||"";
     merged.lastDeliveryStatus=latest.lastDeliveryStatus||merged.lastDeliveryStatus||"";
     merged.lastInboundMessageAt=rows.map(x=>x.lastInboundMessageAt).filter(Boolean).sort().pop()||merged.lastInboundMessageAt||null;
     merged.customerWindowExpiresAt=rows.map(x=>x.customerWindowExpiresAt).filter(Boolean).sort().pop()||merged.customerWindowExpiresAt||null;

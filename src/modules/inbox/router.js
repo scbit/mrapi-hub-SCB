@@ -348,7 +348,9 @@ function summary(doc){
   return {
     id: doc.id,
     contactId: d.contactId || "",
+    contactIds: uniqueStrings([d.contactId, ...(Array.isArray(d.contactIds)?d.contactIds:[])]),
     dealId: d.dealId || "",
+    dealIds: uniqueStrings([d.dealId, ...(Array.isArray(d.dealIds)?d.dealIds:[])]),
     contactName: d.contactName || d.profileName || d.name || "",
     companyName: d.companyName || "",
     waFrom: d.waFrom || "",
@@ -392,9 +394,61 @@ function summary(doc){
     campaignName: d.leadOriginCampaignName || d.campaignName || d.leadAd?.campaignName || "",
     adsetName: d.leadOriginAdsetName || d.adsetName || d.leadAd?.adsetName || "",
     leadAd: d.leadAd && typeof d.leadAd === "object" ? d.leadAd : null,
-    duplicateConversationIds: uniqueStrings(d.duplicateConversationIds || [])
+    duplicateConversationIds: uniqueStrings(d.duplicateConversationIds || []),
+    relatedConversationIds: [doc.id],
+    conversationKey: `${conversationCustomerPhone(d,doc.id)}__${digits(conversationLine(d,doc.id))}`
   };
 }
+
+function summaryTimeMs(item){
+  const ms=new Date(item?.lastMessageAt||0).getTime();
+  return Number.isFinite(ms)?ms:0;
+}
+function mergeConversationSummaries(items=[]){
+  const groups=new Map();
+  for(const item of items){
+    if(!item) continue;
+    const customer=digits(item.waFrom||"");
+    const line=digits(item.lineId||item.inboundTo||"");
+    const key=(customer&&line)?`${customer}__${line}`:`id:${item.id}`;
+    if(!groups.has(key))groups.set(key,[]);
+    groups.get(key).push(item);
+  }
+  const out=[];
+  for(const [key,rows] of groups){
+    rows.sort((a,b)=>summaryTimeMs(b)-summaryTimeMs(a));
+    const readable=key.startsWith("id:")?"":key;
+    const parts=readable?readable.split("__"):[];
+    const deterministic=(parts.length===2)?deterministicConversationId(parts[0],parts[1]):"";
+    const primary=rows.find(x=>x.id===deterministic)||rows[0];
+    const latest=rows[0];
+    const merged={...primary};
+    const first=(field)=>rows.map(x=>x?.[field]).find(v=>v!==null&&v!==undefined&&String(v).trim())||merged[field]||"";
+    for(const field of ["contactName","companyName","waFrom","inboundTo","lineId","preferredLineId","lineLabel","ownerEmail","provider","sourceChannel","leadPlatform","leadOriginType","leadOriginMessage","leadOriginAt","leadOriginCtwaClid","leadOriginAdId","leadOriginSourceType","leadOriginHeadline","leadOriginBody","leadOriginImageUrl","leadOriginSourceUrl","referralCtwaClid","referralAdId","referralSourceType","referralHeadline","referralBody","referralImageUrl","campaignName","adsetName"]) merged[field]=first(field);
+    merged.lastMessage=latest.lastMessage||merged.lastMessage||"";
+    merged.lastMessageAt=latest.lastMessageAt||merged.lastMessageAt||null;
+    merged.mode=latest.mode||merged.mode||"BOT";
+    merged.stage=latest.stage||merged.stage||"nuevo";
+    merged.lastDeliveryStatus=latest.lastDeliveryStatus||merged.lastDeliveryStatus||"";
+    merged.lastInboundMessageAt=rows.map(x=>x.lastInboundMessageAt).filter(Boolean).sort().pop()||merged.lastInboundMessageAt||null;
+    merged.customerWindowExpiresAt=rows.map(x=>x.customerWindowExpiresAt).filter(Boolean).sort().pop()||merged.customerWindowExpiresAt||null;
+    merged.customerWindowOpen=rows.some(x=>x.customerWindowOpen!==false);
+    merged.unreadCount=rows.reduce((n,x)=>n+Number(x.unreadCount||0),0);
+    merged.contactIds=uniqueStrings(rows.flatMap(x=>[x.contactId,...(x.contactIds||[])]));
+    merged.dealIds=uniqueStrings(rows.flatMap(x=>[x.dealId,...(x.dealIds||[])]));
+    merged.contactId=merged.contactIds[0]||"";
+    merged.dealId=merged.dealIds[0]||"";
+    merged.isLinked=merged.contactIds.length>0||merged.dealIds.length>0;
+    merged.linkedLineIds=canonicalLines(rows.flatMap(x=>[x.lineId,x.inboundTo,...(x.linkedLineIds||[])]));
+    merged.lineCount=Math.max(1,merged.linkedLineIds.length);
+    merged.relatedConversationIds=uniqueStrings(rows.flatMap(x=>[x.id,...(x.relatedConversationIds||[]),...(x.duplicateConversationIds||[])]));
+    merged.duplicateConversationIds=merged.relatedConversationIds.filter(x=>x!==merged.id);
+    merged.conversationKey=readable||primary.conversationKey||"";
+    out.push(merged);
+  }
+  return out.sort((a,b)=>summaryTimeMs(b)-summaryTimeMs(a));
+}
+
 function message(doc, conversationId){
   const d=doc.data()||{};
   return {
@@ -535,7 +589,7 @@ router.get("/conversations", authRequired, async(req,res)=>{
       if(c.exists)cursorDoc=c;
     }
     const loaded=await conversationDocsByOwners({owners,limit,cursorDoc});
-    const items=loaded.docs.map(summary);
+    const items=mergeConversationSummaries(loaded.docs.map(summary));
     const last=loaded.docs[loaded.docs.length-1];
     return res.json({ok:true,items,nextCursor:last?.id||null,hasMore:loaded.hasMore,readsEstimate:loaded.reads+cursorRead,ownersApplied:owners});
   }catch(e){
@@ -555,7 +609,7 @@ router.get("/conversations/changes", authRequired, async(req,res)=>{
     const visible=await visibleOwners(req.authUser);
     const owners=ownerFilterValues(req,visible);
     const loaded=await conversationDocsByOwners({owners,limit:100,sinceDate});
-    return res.json({ok:true,items:loaded.docs.map(summary),readsEstimate:loaded.reads,serverNow:new Date().toISOString(),ownersApplied:owners});
+    return res.json({ok:true,items:mergeConversationSummaries(loaded.docs.map(summary)),readsEstimate:loaded.reads,serverNow:new Date().toISOString(),ownersApplied:owners});
   }catch(e){
     console.error("inbox changes",e);
     if(e.status===403)return res.status(403).json({ok:false,error:e.message});
@@ -573,7 +627,7 @@ router.get("/conversations/search",authRequired,async(req,res)=>{
     if(phone.length < 6) return res.json({ok:true,items:[],readsEstimate:0,scope:"loaded-page",note:"Nombre/texto se filtra sobre la página cargada; la búsqueda histórica v0.2 es por teléfono."});
     const variants=uniqueStrings([phone,`+${phone}`,`whatsapp:+${phone}`,`whatsapp:${phone}`]).slice(0,10);
     const snap=await inboxDb.collection("conversations").where("waFrom","in",variants).limit(50).get();
-    return res.json({ok:true,items:snap.docs.map(summary),readsEstimate:snap.size,scope:"phone-index"});
+    return res.json({ok:true,items:mergeConversationSummaries(snap.docs.map(summary)),readsEstimate:snap.size,scope:"phone-index"});
   }catch(e){ console.error("inbox search",e); return res.status(500).json({ok:false,error:e.message}); }
 });
 
@@ -616,12 +670,35 @@ async function resolveConversationSnapshot(rawId){
   return {snap:null,reads};
 }
 
+async function resolveConversationGroup(rawId){
+  const base=await resolveConversationSnapshot(rawId);
+  if(!base.snap)return {snaps:[],reads:base.reads||0,item:null};
+  const seed=base.snap.data()||{};
+  const customer=conversationCustomerPhone(seed,base.snap.id);
+  const line=digits(conversationLine(seed,base.snap.id));
+  const docs=new Map([[base.snap.id,base.snap]]);
+  let reads=base.reads||0;
+  if(customer&&line){
+    const variants=uniqueStrings([customer,`+${customer}`,`whatsapp:+${customer}`,`whatsapp:${customer}`]).slice(0,10);
+    try{
+      const q=await inboxDb.collection("conversations").where("waFrom","in",variants).limit(30).get();
+      reads+=q.size;
+      for(const doc of q.docs){
+        const d=doc.data()||{};
+        if(conversationCustomerPhone(d,doc.id)===customer && digits(conversationLine(d,doc.id))===line) docs.set(doc.id,doc);
+      }
+    }catch(e){console.warn("resolve conversation group",e.message||String(e));}
+  }
+  const summaries=mergeConversationSummaries([...docs.values()].map(summary));
+  return {snaps:[...docs.values()],reads,item:summaries[0]||summary(base.snap),customer,line};
+}
+
 router.get("/conversations/:id",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);if(!id)return res.status(400).json({ok:false,error:"Conversación inválida"});
-    const resolved=await resolveConversationSnapshot(id);
-    if(!resolved.snap)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
-    return res.json({ok:true,item:summary(resolved.snap),readsEstimate:resolved.reads});
+    const resolved=await resolveConversationGroup(id);
+    if(!resolved.item)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
+    return res.json({ok:true,item:resolved.item,readsEstimate:resolved.reads});
   }catch(e){return res.status(500).json({ok:false,error:e.message});}
 });
 
@@ -633,18 +710,28 @@ function crmDealItem(doc,fallbackContactId=""){
 router.get("/conversations/:id/crm-summary",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);if(!id)return res.status(400).json({ok:false,error:"Conversación inválida"});
-    const resolved=await resolveConversationSnapshot(id);if(!resolved.snap)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
-    const convo=resolved.snap,c=convo.data()||{};let reads=resolved.reads,deal=null,contact=null,deals=[];
-    const preferredDealId=cleanString(c.dealId,220);let contactId=cleanString(c.contactId,220);
-    if(preferredDealId){const d=await crmDb.collection("deals").doc(preferredDealId).get();reads++;if(d.exists){deal=crmDealItem(d,contactId);contactId=cleanString(deal.contactId||contactId,220);}}
-    if(contactId){
-      const ds=await crmDb.collection("deals").where("contactId","==",contactId).limit(100).get();reads+=ds.size;
-      deals=ds.docs.map(d=>crmDealItem(d,contactId)).sort((a,b)=>String(b.updatedAt||b.createdAt||"").localeCompare(String(a.updatedAt||a.createdAt||"")));
-      if(deal && !deals.some(x=>x.id===deal.id))deals.unshift(deal);
-      if(!deal)deal=deals[0]||null;
-      const d=await crmDb.collection("contacts").doc(contactId).get();reads++;if(d.exists){const x=d.data()||{};contact={id:d.id,name:x.name||x.fullName||c.contactName||"",company:x.company||x.companyName||c.companyName||"",phone:x.phone||c.waFrom||"",email:x.email||"",owner:x.owner||deal?.owner||c.ownerEmail||"",city:x.city||x.location||""};}
+    const resolved=await resolveConversationGroup(id);if(!resolved.item)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
+    const convos=resolved.snaps, mergedConvo=resolved.item;let reads=resolved.reads,deal=null,contact=null,deals=[];
+    const contactIds=uniqueStrings(convos.flatMap(doc=>{const x=doc.data()||{};return [x.contactId,...(Array.isArray(x.contactIds)?x.contactIds:[])];}));
+    const explicitDealIds=uniqueStrings(convos.flatMap(doc=>{const x=doc.data()||{};return [x.dealId,...(Array.isArray(x.dealIds)?x.dealIds:[])];}));
+    const dealMap=new Map();
+    for(const chunk of chunkValues(explicitDealIds,30)){
+      if(!chunk.length)continue;
+      const ds=await crmDb.collection("deals").where(admin.firestore.FieldPath.documentId(),"in",chunk).get();reads+=ds.size;
+      for(const d of ds.docs)dealMap.set(d.id,crmDealItem(d,cleanString((d.data()||{}).contactId,220)));
     }
-    return res.json({ok:true,deal,deals,contact,stages:PIPELINE_STAGES,conversationKey:`${conversationCustomerPhone(c,convo.id)}__${digits(conversationLine(c,convo.id))}`,readsEstimate:reads});
+    for(const contactId of contactIds.slice(0,20)){
+      const ds=await crmDb.collection("deals").where("contactId","==",contactId).limit(100).get();reads+=ds.size;
+      for(const d of ds.docs)dealMap.set(d.id,crmDealItem(d,contactId));
+    }
+    deals=[...dealMap.values()].sort((a,b)=>String(b.updatedAt||b.createdAt||"").localeCompare(String(a.updatedAt||a.createdAt||"")));
+    const preferredDealIds=uniqueStrings(convos.map(doc=>cleanString((doc.data()||{}).dealId,220)));
+    deal=preferredDealIds.map(x=>dealMap.get(x)).find(Boolean)||deals[0]||null;
+    const preferredContactId=cleanString(deal?.contactId||contactIds[0],220);
+    if(preferredContactId){
+      const d=await crmDb.collection("contacts").doc(preferredContactId).get();reads++;if(d.exists){const x=d.data()||{};contact={id:d.id,name:x.name||x.fullName||mergedConvo.contactName||"",company:x.company||x.companyName||mergedConvo.companyName||"",phone:x.phone||mergedConvo.waFrom||"",email:x.email||"",owner:x.owner||deal?.owner||mergedConvo.ownerEmail||"",city:x.city||x.location||""};}
+    }
+    return res.json({ok:true,deal,deals,contact,stages:PIPELINE_STAGES,conversationKey:mergedConvo.conversationKey,relatedConversationIds:mergedConvo.relatedConversationIds||[],readsEstimate:reads});
   }catch(e){console.error("inbox crm-summary",e);return res.status(500).json({ok:false,error:e.message});}
 });
 
@@ -836,9 +923,16 @@ router.get("/conversations/:id/messages",authRequired,async(req,res)=>{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);
     if(!id) return res.status(400).json({ok:false,error:"Conversación inválida"});
     const requested=Math.max(20,Math.min(Number(req.query.limit||60),100));
-    const snap=await inboxDb.collection("conversations").doc(id).collection("messages").orderBy("timestamp","desc").limit(requested).get();
-    const items=snap.docs.map(d=>message(d,id)).sort((a,b)=>String(a.timestamp||"").localeCompare(String(b.timestamp||"")));
-    return res.json({ok:true,items,readsEstimate:snap.size,relatedConversations:1});
+    const related=uniqueStrings([id,...String(req.query.related||"").split(",")]).slice(0,10);
+    let reads=0;const all=[];
+    for(const conversationId of related){
+      const snap=await inboxDb.collection("conversations").doc(conversationId).collection("messages").orderBy("timestamp","desc").limit(requested).get();
+      reads+=snap.size;for(const d of snap.docs)all.push(message(d,conversationId));
+    }
+    const by=new Map();
+    for(const m of all){const key=m.messageSid||`${m.conversationId}:${m.id}`;const prev=by.get(key);if(!prev||String(prev.timestamp||"")<=String(m.timestamp||""))by.set(key,m);}
+    const items=[...by.values()].sort((a,b)=>String(a.timestamp||"").localeCompare(String(b.timestamp||""))).slice(-requested);
+    return res.json({ok:true,items,readsEstimate:reads,relatedConversations:related.length});
   }catch(e){ console.error("inbox messages",e); return res.status(500).json({ok:false,error:e.message}); }
 });
 
@@ -849,9 +943,15 @@ router.get("/conversations/:id/messages/changes",authRequired,async(req,res)=>{
     const sinceRaw=cleanString(req.query.since,80); const sinceDate=new Date(sinceRaw);
     if(!id) return res.status(400).json({ok:false,error:"Conversación inválida"});
     if(!sinceRaw || Number.isNaN(sinceDate.getTime())) return res.status(400).json({ok:false,error:"Checkpoint inválido"});
-    const snap=await inboxDb.collection("conversations").doc(id).collection("messages")
-      .where("timestamp",">=",sinceDate).orderBy("timestamp","asc").limit(100).get();
-    return res.json({ok:true,items:snap.docs.map(d=>message(d,id)),readsEstimate:snap.size,serverNow:new Date().toISOString()});
+    const related=uniqueStrings([id,...String(req.query.related||"").split(",")]).slice(0,10);
+    let reads=0;const all=[];
+    for(const conversationId of related){
+      const snap=await inboxDb.collection("conversations").doc(conversationId).collection("messages")
+        .where("timestamp",">=",sinceDate).orderBy("timestamp","asc").limit(100).get();
+      reads+=snap.size;for(const d of snap.docs)all.push(message(d,conversationId));
+    }
+    const by=new Map();for(const m of all){const key=m.messageSid||`${m.conversationId}:${m.id}`;by.set(key,{...(by.get(key)||{}),...m});}
+    return res.json({ok:true,items:[...by.values()].sort((a,b)=>String(a.timestamp||"").localeCompare(String(b.timestamp||""))),readsEstimate:reads,serverNow:new Date().toISOString()});
   }catch(e){ console.error("inbox message changes",e); return res.status(500).json({ok:false,error:e.message}); }
 });
 

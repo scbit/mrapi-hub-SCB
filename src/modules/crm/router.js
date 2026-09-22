@@ -262,17 +262,57 @@ router.get("/deals/:id/hub-link",async(req,res)=>{
     if(!candidates.size)return res.json({ok:true,found:false,error:"No se encontró conversación vinculada",readsEstimate:reads});
     const digits=v=>String(v||"").replace(/\D/g,"");
     const customerOf=x=>digits(x.waFrom||x.from||x.phone||x.customerPhone||x.contactPhone||"")||digits(String(x.id||"").split(/__+|[_|]/)[0]);
-    const lineOf=x=>digits(x.lineId||x.inboundTo||x.preferredLineId||"")||digits(String(x.id||"").split(/__+/)[1]||"");
+    const lineOf=x=>digits(x.lineId||x.inboundTo||x.preferredLineId||x.waTo||x.to||x.linePhone||x.recipientPhone||"")||digits(String(x.id||"").split(/__+/)[1]||"");
     const tsMillis=v=>{try{return v?.toMillis?v.toMillis():(v?.toDate?v.toDate().getTime():new Date(v||0).getTime()||0)}catch{return 0}};
-    const rows=[...candidates.values()].sort((a,b)=>{
-      const aExplicit=(String(a.dealId||"")===req.params.id||(Array.isArray(a.dealIds)&&a.dealIds.includes(req.params.id)))?1:0;
-      const bExplicit=(String(b.dealId||"")===req.params.id||(Array.isArray(b.dealIds)&&b.dealIds.includes(req.params.id)))?1:0;
-      if(aExplicit!==bExplicit)return bExplicit-aExplicit;
-      return tsMillis(b.lastMessageAt||b.updatedAt)-tsMillis(a.lastMessageAt||a.updatedAt);
+    const hasSummaryActivity=x=>Boolean(String(x.lastMessage||x.lastMessageText||x.preview||"").trim()||tsMillis(x.lastMessageAt)||Number(x.messageCount||0)>0);
+    const isExplicit=x=>String(x.dealId||"")===req.params.id||(Array.isArray(x.dealIds)&&x.dealIds.includes(req.params.id));
+    const isDirect=x=>Boolean(directId&&x.id===directId);
+    const contactMatch=x=>Boolean(deal.contactId&&(String(x.contactId||"")===String(deal.contactId)||(Array.isArray(x.contactIds)&&x.contactIds.map(String).includes(String(deal.contactId)))));
+
+    let rows=[...candidates.values()];
+    // If we know the customer phone, never let an orphan wa_* document with no matching
+    // customer identity beat the real historical chat just because it still stores dealId.
+    if(phone){
+      const sameCustomer=rows.filter(x=>customerOf(x)===phone);
+      if(sameCustomer.length) rows=sameCustomer;
+    }
+
+    // Old migrations left some deal-linked wa_* shells with zero messages. Probe the small
+    // candidate set and prefer the conversation that actually contains the customer's history.
+    const probe=rows.slice(0,20);
+    for(const row of probe){
+      try{
+        const ms=await inboxDb.collection("conversations").doc(row.id).collection("messages").orderBy("timestamp","desc").limit(1).get();
+        reads+=ms.size;
+        row.__hasMessages=!ms.empty;
+        row.__messageTs=!ms.empty?tsMillis((ms.docs[0].data()||{}).timestamp):0;
+      }catch(e){
+        console.warn("hub-link message probe",row.id,e.message||String(e));
+        row.__hasMessages=false;row.__messageTs=0;
+      }
+    }
+
+    const score=x=>{
+      let n=0;
+      if(phone&&customerOf(x)===phone)n+=1000;
+      if(x.__hasMessages)n+=500;
+      if(hasSummaryActivity(x))n+=250;
+      if(isExplicit(x))n+=120;
+      if(contactMatch(x))n+=80;
+      if(isDirect(x))n+=20; // direct legacy ids are only a hint; never outrank real history
+      if(lineOf(x))n+=25;
+      if(String(x.leadOriginAdId||x.referralAdId||"").trim())n+=10;
+      return n;
+    };
+    rows.sort((a,b)=>{
+      const diff=score(b)-score(a);if(diff)return diff;
+      const bt=b.__messageTs||tsMillis(b.lastMessageAt||b.updatedAt||b.createdAt);
+      const at=a.__messageTs||tsMillis(a.lastMessageAt||a.updatedAt||a.createdAt);
+      return bt-at;
     });
     const selected=rows[0],customer=customerOf(selected),line=lineOf(selected);
     const publicId=customer&&line?`${customer}__${line}`:selected.id;
-    return res.json({ok:true,found:true,conversationId:publicId,url:`/inbox?conversationId=${encodeURIComponent(publicId)}`,readsEstimate:reads,legacyResolved:publicId!==selected.id});
+    return res.json({ok:true,found:true,conversationId:publicId,url:`/inbox?conversationId=${encodeURIComponent(publicId)}`,readsEstimate:reads,legacyResolved:publicId!==selected.id,selectedInternalId:selected.id,selectedHasMessages:Boolean(selected.__hasMessages||hasSummaryActivity(selected))});
   }catch(e){console.error("hub-link",e);return res.status(500).json({ok:false,found:false,error:e.message});}
 });
 

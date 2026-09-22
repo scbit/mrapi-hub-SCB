@@ -739,12 +739,35 @@ router.get("/conversations/:id/crm-summary",authRequired,async(req,res)=>{
       const customerPhone=digits(resolved.customer||mergedConvo.waFrom||mergedConvo.phone||"");
       if(customerPhone.length>=7){
         try{
-          const found=await searchContactsIndexed(customerPhone,25);reads+=found.reads||0;
-          const exact=found.docs.find(d=>digits((d.data()||{}).phone)===customerPhone);
-          if(exact){
-            const x=exact.data()||{};
-            contactIds=[exact.id];
-            contact={id:exact.id,name:x.name||x.fullName||mergedConvo.contactName||"",company:x.company||x.companyName||mergedConvo.companyName||"",phone:x.phone||mergedConvo.waFrom||"",email:x.email||"",owner:x.owner||mergedConvo.ownerEmail||"",city:x.city||x.location||""};
+          // Fast exact legacy recovery. Old CRM records often predate searchTerms, so an
+          // indexed-only lookup can miss a perfectly valid contact/deal. Query the common
+          // stored phone variants first (very low read cost), then fall back to the index.
+          const phoneVariants=uniqueStrings([customerPhone,`+${customerPhone}`,`whatsapp:+${customerPhone}`,`whatsapp:${customerPhone}`]);
+          let exactContact=null;
+          if(phoneVariants.length){
+            const cs=await crmDb.collection("contacts").where("phone","in",phoneVariants.slice(0,10)).limit(10).get();reads+=cs.size;
+            exactContact=cs.docs.find(d=>digits((d.data()||{}).phone)===customerPhone)||null;
+          }
+          // A legacy deal may know the phone even when its contact document has no search
+          // index. Recover contactId/dealId directly from the deal in that case.
+          if(phoneVariants.length){
+            const ds=await crmDb.collection("deals").where("contactPhone","in",phoneVariants.slice(0,10)).limit(50).get();reads+=ds.size;
+            for(const d of ds.docs){
+              const x=d.data()||{};
+              if(digits(x.contactPhone)!==customerPhone)continue;
+              const cid=cleanString(x.contactId,220);
+              if(cid)contactIds=uniqueStrings([...contactIds,cid]);
+              if(!explicitDealIds.includes(d.id))explicitDealIds.push(d.id);
+            }
+          }
+          if(!exactContact){
+            const found=await searchContactsIndexed(customerPhone,25);reads+=found.reads||0;
+            exactContact=found.docs.find(d=>digits((d.data()||{}).phone)===customerPhone)||null;
+          }
+          if(exactContact){
+            const x=exactContact.data()||{};
+            contactIds=uniqueStrings([exactContact.id,...contactIds]);
+            contact={id:exactContact.id,name:x.name||x.fullName||mergedConvo.contactName||"",company:x.company||x.companyName||mergedConvo.companyName||"",phone:x.phone||mergedConvo.waFrom||"",email:x.email||"",owner:x.owner||mergedConvo.ownerEmail||"",city:x.city||x.location||""};
           }
         }catch(e){console.warn("crm-summary phone fallback",e.message||String(e));}
       }

@@ -235,11 +235,44 @@ router.get("/deals/:id/hub-link",async(req,res)=>{
     const dealRef=crmDb.collection("deals").doc(req.params.id);const dealSnap=await dealRef.get();
     if(!dealSnap.exists)return res.status(404).json({ok:false,found:false,error:"Trato no encontrado"});
     const deal=dealSnap.data()||{};if(!(await canSeeOwner(req.authUser,deal.owner)))return res.status(403).json({ok:false,found:false,error:"Sin permiso"});
-    const snap=await inboxDb.collection("conversations").where("dealId","==",req.params.id).limit(10).get();
-    if(snap.empty)return res.json({ok:true,found:false,error:"No se encontró conversación vinculada",readsEstimate:1});
+    let reads=1;const candidates=new Map();
+    const addSnap=snap=>{reads+=snap.size;for(const d of snap.docs)candidates.set(d.id,{id:d.id,...(d.data()||{})})};
+    const safeQuery=async(fn)=>{try{addSnap(await fn())}catch(e){console.warn("hub-link lookup",e.message||String(e))}};
+
+    // 1) Vínculos explícitos del trato: formato actual + multi-trato.
+    await safeQuery(()=>inboxDb.collection("conversations").where("dealId","==",req.params.id).limit(20).get());
+    await safeQuery(()=>inboxDb.collection("conversations").where("dealIds","array-contains",req.params.id).limit(20).get());
+
+    // 2) Si el trato viejo guardó un conversationId directo, conservarlo como candidato.
+    const directId=String(deal.hubConversationId||deal.conversationId||"").trim();
+    if(directId){const d=await inboxDb.collection("conversations").doc(directId).get();reads++;if(d.exists)candidates.set(d.id,{id:d.id,...(d.data()||{})})}
+
+    // 3) Tratos legacy: resolver por contacto y, como último fallback, por teléfono del contacto.
+    let contact=null;
+    if(deal.contactId){const c=await crmDb.collection("contacts").doc(String(deal.contactId)).get();reads++;if(c.exists)contact={id:c.id,...(c.data()||{})}}
+    if(deal.contactId)await safeQuery(()=>inboxDb.collection("conversations").where("contactId","==",String(deal.contactId)).limit(30).get());
+    const phone=String(contact?.phone||deal.contactPhone||deal.phone||"").replace(/\D/g,"");
+    if(phone){
+      const variants=[phone,`+${phone}`,`whatsapp:+${phone}`,`whatsapp:${phone}`];
+      for(const field of ["waFrom","customerPhone","phone","from","contactPhone"]){
+        await safeQuery(()=>inboxDb.collection("conversations").where(field,"in",variants).limit(30).get());
+      }
+    }
+
+    if(!candidates.size)return res.json({ok:true,found:false,error:"No se encontró conversación vinculada",readsEstimate:reads});
+    const digits=v=>String(v||"").replace(/\D/g,"");
+    const customerOf=x=>digits(x.waFrom||x.from||x.phone||x.customerPhone||x.contactPhone||"")||digits(String(x.id||"").split(/__+|[_|]/)[0]);
+    const lineOf=x=>digits(x.lineId||x.inboundTo||x.preferredLineId||"")||digits(String(x.id||"").split(/__+/)[1]||"");
     const tsMillis=v=>{try{return v?.toMillis?v.toMillis():(v?.toDate?v.toDate().getTime():new Date(v||0).getTime()||0)}catch{return 0}};
-    const rows=snap.docs.map(d=>({id:d.id,...(d.data()||{})})).sort((a,b)=>tsMillis(b.lastMessageAt||b.updatedAt)-tsMillis(a.lastMessageAt||a.updatedAt));
-    const selected=rows[0];return res.json({ok:true,found:true,conversationId:selected.id,url:`/inbox?conversationId=${encodeURIComponent(selected.id)}`,readsEstimate:1+snap.size});
+    const rows=[...candidates.values()].sort((a,b)=>{
+      const aExplicit=(String(a.dealId||"")===req.params.id||(Array.isArray(a.dealIds)&&a.dealIds.includes(req.params.id)))?1:0;
+      const bExplicit=(String(b.dealId||"")===req.params.id||(Array.isArray(b.dealIds)&&b.dealIds.includes(req.params.id)))?1:0;
+      if(aExplicit!==bExplicit)return bExplicit-aExplicit;
+      return tsMillis(b.lastMessageAt||b.updatedAt)-tsMillis(a.lastMessageAt||a.updatedAt);
+    });
+    const selected=rows[0],customer=customerOf(selected),line=lineOf(selected);
+    const publicId=customer&&line?`${customer}__${line}`:selected.id;
+    return res.json({ok:true,found:true,conversationId:publicId,url:`/inbox?conversationId=${encodeURIComponent(publicId)}`,readsEstimate:reads,legacyResolved:publicId!==selected.id});
   }catch(e){console.error("hub-link",e);return res.status(500).json({ok:false,found:false,error:e.message});}
 });
 

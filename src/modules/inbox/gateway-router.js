@@ -91,16 +91,32 @@ router.post("/events",async(req,res)=>{
         const from=wa.ensureWhatsappPrefix(`+${customer}`);
         const to=wa.ensureWhatsappPrefix(`+${display}`);
         const conversationId=deterministicConversationId(from,to);
-        const msgRef=inboxDb.collection("conversations").doc(conversationId).collection("messages").doc(clean(event.providerMessageId,180));
-        await msgRef.set({
-          deliveryStatus:clean(event.status,60)||"unknown",
-          deliveryUpdatedAt:FieldValue.serverTimestamp(),
-          providerStatusRaw:event.raw||null
-        },{merge:true});
-        await inboxDb.collection("conversations").doc(conversationId).set({
-          lastDeliveryStatus:clean(event.status,60)||"unknown",
-          updatedAt:FieldValue.serverTimestamp()
-        },{merge:true});
+        const sid=clean(event.providerMessageId,180);
+        const status=clean(event.status,60)||"unknown";
+        const candidates=new Map();
+        const direct=await inboxDb.collection("conversations").doc(conversationId).get();
+        if(direct.exists)candidates.set(direct.id,direct);
+        const variants=[customer,`+${customer}`,`whatsapp:+${customer}`,`whatsapp:${customer}`];
+        try{
+          const q=await inboxDb.collection("conversations").where("waFrom","in",variants).limit(30).get();
+          for(const d of q.docs){const x=d.data()||{};const line=digits(x.inboundTo||x.lineId||x.preferredLineId||"");if(line===display)candidates.set(d.id,d)}
+        }catch(e){console.warn("gateway status legacy lookup",e.message||String(e))}
+
+        let updated=0;
+        for(const [id] of candidates){
+          const ref=inboxDb.collection("conversations").doc(id).collection("messages").doc(sid);
+          const existing=await ref.get();
+          if(!existing.exists)continue;
+          await ref.set({deliveryStatus:status,deliveryUpdatedAt:FieldValue.serverTimestamp(),providerStatusRaw:event.raw||null},{merge:true});
+          await inboxDb.collection("conversations").doc(id).set({lastDeliveryStatus:status,updatedAt:FieldValue.serverTimestamp()},{merge:true});
+          updated++;
+        }
+        // Si todavía no existe el mensaje (race de webhook), conservar el estado en la conversación canónica.
+        if(!updated){
+          const msgRef=inboxDb.collection("conversations").doc(conversationId).collection("messages").doc(sid);
+          await msgRef.set({deliveryStatus:status,deliveryUpdatedAt:FieldValue.serverTimestamp(),providerStatusRaw:event.raw||null},{merge:true});
+          await inboxDb.collection("conversations").doc(conversationId).set({lastDeliveryStatus:status,updatedAt:FieldValue.serverTimestamp()},{merge:true});
+        }
       }
       return res.json({ok:true,kind:"status"});
     }

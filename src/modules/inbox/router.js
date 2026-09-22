@@ -18,6 +18,7 @@ const FieldValue = admin.firestore.FieldValue;
 const { PIPELINE_STAGES } = require("../crm/constants");
 const {TARGET_STAGE,sendCotizadoAlert}=require("../crm/cotizado-alert");
 const { visibleOwners, canSeeOwner, isAdminLike } = require("../crm/access");
+const { searchContactsIndexed } = require("../crm/search-index");
 
 const { markRecontactResponse } = require("../crm/recovery-service");
 
@@ -623,11 +624,26 @@ router.get("/conversations/search",authRequired,async(req,res)=>{
   try{
     const raw=cleanString(req.query.q,120); const phone=digits(raw);
     if(!raw) return res.json({ok:true,items:[],readsEstimate:0,scope:"none"});
-    // v0.2: búsqueda histórica solo por teléfono exacto/variantes. Nunca escanea miles de docs.
-    if(phone.length < 6) return res.json({ok:true,items:[],readsEstimate:0,scope:"loaded-page",note:"Nombre/texto se filtra sobre la página cargada; la búsqueda histórica v0.2 es por teléfono."});
-    const variants=uniqueStrings([phone,`+${phone}`,`whatsapp:+${phone}`,`whatsapp:${phone}`]).slice(0,10);
-    const snap=await inboxDb.collection("conversations").where("waFrom","in",variants).limit(50).get();
-    return res.json({ok:true,items:mergeConversationSummaries(snap.docs.map(summary)),readsEstimate:snap.size,scope:"phone-index"});
+    let reads=0;const docs=new Map();
+    const addSnap=snap=>{reads+=snap.size;for(const d of snap.docs)docs.set(d.id,d)};
+    const safe=async fn=>{try{addSnap(await fn())}catch(e){console.warn("inbox search query",e.message||String(e))}};
+
+    // Teléfono: soporta formatos legacy (whatsapp:+54..., +54..., 54...) y campos históricos.
+    if(phone.length>=6){
+      const variants=uniqueStrings([phone,`+${phone}`,`whatsapp:+${phone}`,`whatsapp:${phone}`]).slice(0,10);
+      for(const field of ["waFrom","customerPhone","phone","from","contactPhone"])
+        await safe(()=>inboxDb.collection("conversations").where(field,"in",variants).limit(50).get());
+    }else{
+      // Nombre: usar el índice global de Contactos del CRM y luego traer sólo sus chats.
+      const found=await searchContactsIndexed(raw,30);reads+=found.reads;
+      const ids=found.docs.map(d=>d.id).slice(0,30);
+      for(let i=0;i<ids.length;i+=10){const chunk=ids.slice(i,i+10);if(chunk.length)await safe(()=>inboxDb.collection("conversations").where("contactId","in",chunk).limit(50).get())}
+      // También resolver por teléfono de esos contactos para conversaciones legacy sin contactId.
+      for(const c of found.docs.slice(0,12)){const p=digits((c.data()||{}).phone||"");if(!p)continue;const v=uniqueStrings([p,`+${p}`,`whatsapp:+${p}`,`whatsapp:${p}`]);await safe(()=>inboxDb.collection("conversations").where("waFrom","in",v).limit(20).get())}
+    }
+
+    const items=mergeConversationSummaries([...docs.values()].map(summary));
+    return res.json({ok:true,items,readsEstimate:reads,scope:phone.length>=6?"phone-global":"contact-global"});
   }catch(e){ console.error("inbox search",e); return res.status(500).json({ok:false,error:e.message}); }
 });
 

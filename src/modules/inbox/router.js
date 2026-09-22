@@ -729,8 +729,27 @@ router.get("/conversations/:id/crm-summary",authRequired,async(req,res)=>{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);if(!id)return res.status(400).json({ok:false,error:"Conversación inválida"});
     const resolved=await resolveConversationGroup(id);if(!resolved.item)return res.status(404).json({ok:false,error:"Conversación no encontrada"});
     const convos=resolved.snaps, mergedConvo=resolved.item;let reads=resolved.reads,deal=null,contact=null,deals=[];
-    const contactIds=uniqueStrings(convos.flatMap(doc=>{const x=doc.data()||{};return [x.contactId,...(Array.isArray(x.contactIds)?x.contactIds:[])];}));
+    let contactIds=uniqueStrings(convos.flatMap(doc=>{const x=doc.data()||{};return [x.contactId,...(Array.isArray(x.contactIds)?x.contactIds:[])];}));
     const explicitDealIds=uniqueStrings(convos.flatMap(doc=>{const x=doc.data()||{};return [x.dealId,...(Array.isArray(x.dealIds)?x.dealIds:[])];}));
+
+    // Legacy self-heal: many old conversations never stored contactId/dealId even though
+    // CRM has a contact with the same WhatsApp number. Resolve using the normalized
+    // customer phone so whatsapp:+549... / +549... / 549... all map to the same contact.
+    if(!contactIds.length){
+      const customerPhone=digits(resolved.customer||mergedConvo.waFrom||mergedConvo.phone||"");
+      if(customerPhone.length>=7){
+        try{
+          const found=await searchContactsIndexed(customerPhone,25);reads+=found.reads||0;
+          const exact=found.docs.find(d=>digits((d.data()||{}).phone)===customerPhone);
+          if(exact){
+            const x=exact.data()||{};
+            contactIds=[exact.id];
+            contact={id:exact.id,name:x.name||x.fullName||mergedConvo.contactName||"",company:x.company||x.companyName||mergedConvo.companyName||"",phone:x.phone||mergedConvo.waFrom||"",email:x.email||"",owner:x.owner||mergedConvo.ownerEmail||"",city:x.city||x.location||""};
+          }
+        }catch(e){console.warn("crm-summary phone fallback",e.message||String(e));}
+      }
+    }
+
     const dealMap=new Map();
     for(const chunk of chunkValues(explicitDealIds,30)){
       if(!chunk.length)continue;
@@ -745,8 +764,28 @@ router.get("/conversations/:id/crm-summary",authRequired,async(req,res)=>{
     const preferredDealIds=uniqueStrings(convos.map(doc=>cleanString((doc.data()||{}).dealId,220)));
     deal=preferredDealIds.map(x=>dealMap.get(x)).find(Boolean)||deals[0]||null;
     const preferredContactId=cleanString(deal?.contactId||contactIds[0],220);
-    if(preferredContactId){
+    if(preferredContactId && !contact){
       const d=await crmDb.collection("contacts").doc(preferredContactId).get();reads++;if(d.exists){const x=d.data()||{};contact={id:d.id,name:x.name||x.fullName||mergedConvo.contactName||"",company:x.company||x.companyName||mergedConvo.companyName||"",phone:x.phone||mergedConvo.waFrom||"",email:x.email||"",owner:x.owner||deal?.owner||mergedConvo.ownerEmail||"",city:x.city||x.location||""};}
+    }
+
+    // When we recover a legacy CRM relationship by phone, persist it back on every
+    // physical conversation alias so list filters and future opens are consistent.
+    if(preferredContactId && convos.length){
+      const dealIds=deals.map(x=>x.id).filter(Boolean);
+      const batch=inboxDb.batch();let writes=0;
+      for(const doc of convos){
+        const current=doc.data()||{};
+        const hasContact=uniqueStrings([current.contactId,...(Array.isArray(current.contactIds)?current.contactIds:[])]).includes(preferredContactId);
+        const currentDealIds=uniqueStrings([current.dealId,...(Array.isArray(current.dealIds)?current.dealIds:[])]);
+        const missingDeal=dealIds.some(x=>!currentDealIds.includes(x));
+        if(!hasContact||missingDeal){
+          const patch={contactId:current.contactId||preferredContactId,contactIds:FieldValue.arrayUnion(preferredContactId),crmLinked:true,updatedAt:FieldValue.serverTimestamp()};
+          if(dealIds.length)patch.dealIds=FieldValue.arrayUnion(...dealIds);
+          if(!current.dealId&&dealIds[0])patch.dealId=dealIds[0];
+          batch.set(doc.ref,patch,{merge:true});writes++;
+        }
+      }
+      if(writes){await batch.commit();}
     }
     return res.json({ok:true,deal,deals,contact,stages:PIPELINE_STAGES,conversationKey:mergedConvo.conversationKey,relatedConversationIds:mergedConvo.relatedConversationIds||[],readsEstimate:reads});
   }catch(e){console.error("inbox crm-summary",e);return res.status(500).json({ok:false,error:e.message});}

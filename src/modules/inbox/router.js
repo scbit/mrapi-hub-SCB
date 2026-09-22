@@ -697,14 +697,19 @@ async function resolveConversationGroup(rawId){
   let reads=base.reads||0;
   if(customer&&line){
     const variants=uniqueStrings([customer,`+${customer}`,`whatsapp:+${customer}`,`whatsapp:${customer}`]).slice(0,10);
-    try{
-      const q=await inboxDb.collection("conversations").where("waFrom","in",variants).limit(30).get();
-      reads+=q.size;
-      for(const doc of q.docs){
-        const d=doc.data()||{};
-        if(conversationCustomerPhone(d,doc.id)===customer && digits(conversationLine(d,doc.id))===line) docs.set(doc.id,doc);
-      }
-    }catch(e){console.warn("resolve conversation group",e.message||String(e));}
+    // v1.5.74: los aliases legacy no siempre guardaron el teléfono en waFrom.
+    // Para recuperar el vínculo CRM histórico hay que reunir TODAS las representaciones
+    // del mismo cliente + línea antes de leer contactId/dealId.
+    for(const field of ["waFrom","customerPhone","phone","from","contactPhone"]){
+      try{
+        const q=await inboxDb.collection("conversations").where(field,"in",variants).limit(30).get();
+        reads+=q.size;
+        for(const doc of q.docs){
+          const d=doc.data()||{};
+          if(conversationCustomerPhone(d,doc.id)===customer && digits(conversationLine(d,doc.id))===line) docs.set(doc.id,doc);
+        }
+      }catch(e){console.warn("resolve conversation group",field,e.message||String(e));}
+    }
   }
   const summaries=mergeConversationSummaries([...docs.values()].map(summary));
   return {snaps:[...docs.values()],reads,item:summaries[0]||summary(base.snap),customer,line};

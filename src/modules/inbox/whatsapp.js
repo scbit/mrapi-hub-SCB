@@ -59,7 +59,7 @@ function templateCategory(item){
 async function listApprovedTemplates(){
   assertConfigured();
   const r=await axios.get("https://content.twilio.com/v1/ContentAndApprovals",{auth:{username:accountSid,password:authToken},timeout:20000});
-  return (r.data?.contents||[]).map(item=>({sid:item.sid,name:item.friendly_name||item.friendlyName||item.sid,language:item.language||item.locale||"",category:templateCategory(item),whatsappStatus:approvalStatus(item)})).filter(x=>x.whatsappStatus==="approved").sort((a,b)=>a.name.localeCompare(b.name,"es",{sensitivity:"base"}));
+  return (r.data?.contents||[]).map(item=>{const body=String(item?.types?.["twilio/text"]?.body||item?.types?.["twilio/quick-reply"]?.body||item?.body||"").trim();return {sid:item.sid,name:item.friendly_name||item.friendlyName||item.sid,language:item.language||item.locale||"",category:templateCategory(item),whatsappStatus:approvalStatus(item),body,components:body?[{type:"BODY",text:body}]:[]};}).filter(x=>x.whatsappStatus==="approved").sort((a,b)=>a.name.localeCompare(b.name,"es",{sensitivity:"base"}));
 }
 
 async function downloadMedia(url){

@@ -442,3 +442,5 @@ body{
 .deliveryState{font-weight:800}.deliveryPending{color:#8a6d1d}.deliverySent{color:#667085}.deliveryDelivered{color:#2f6f44}.deliveryRead{color:#1f7a3d}.deliveryFailed{color:#b42318}.deliveryError{margin-top:4px;font-size:12px;line-height:1.35;color:#b42318;font-weight:700}
 /* v1.5.64 - un chat por cliente+linea, multiples tratos por contacto */
 .crmDealPicker{margin-bottom:10px}.crmDealPicker select{font-weight:700}.crmDealTopActions{display:flex;justify-content:flex-end;margin:-2px 0 8px}.crmDealTopActions .btn{padding:8px 10px;font-size:12px}
+
+.crmNoteEditor textarea{width:100%;min-height:82px;resize:vertical;padding:9px 10px;border:1px solid #dfe5dd;border-radius:10px;background:#fff;font:inherit;font-size:12px;line-height:1.4;color:#344054;outline:none}.crmNoteEditor textarea:focus{border-color:#9bd893;box-shadow:0 0 0 3px rgba(47,183,27,.08)}.hubDealNoteSave{width:100%;margin-top:8px;font-size:11px}@media(max-width:850px){.crmNoteEditor textarea{font-size:16px}}

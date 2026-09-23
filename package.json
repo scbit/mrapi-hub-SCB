@@ -1,6 +1,6 @@
 {
   "name": "mrapi-hub",
-  "version": "1.5.84",
+  "version": "1.5.85",
   "private": true,
   "description": "MR API HUB - CRM + HUB + Bandeja multi-tenant para Cloud Run",
   "main": "server.js",

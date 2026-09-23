@@ -4,6 +4,7 @@ const config=require("../../core/config");
 const {admin,crmDb,inboxDb}=require("../../core/google");
 const wa=require("../inbox/whatsapp");
 const FieldValue=admin.firestore.FieldValue;
+const {writeDealAudit}=require("./audit");
 
 const CAMPAIGNS="recontact_campaigns";
 const PHONE_WATCH="recontact_phone_watch";
@@ -68,7 +69,8 @@ async function markRecontactResponse(phoneRaw,inboundSid,extra={}){
       batch.set(campaignRef,{responded:FieldValue.increment(1),updatedAt:now,lastResponseAt:now},{merge:true});
       batch.set(dealSnap.ref,{stage:RESPONSE_STAGE,lastCampaignResponseAt:now,lastCampaignResponseId:campaignId,lastCampaignResponseName:clean(c.name,180),lastCampaignResponseMessageSid:clean(inboundSid,180),notes:(note+(prevNotes?`\n\n${prevNotes}`:"")).slice(0,4000),updatedAt:now},{merge:true});
       await batch.commit();
-      await dealSnap.ref.collection("notes").add({note,user:"system:recovery",createdAt:FieldValue.serverTimestamp(),source:"recontact_response"}).catch(()=>{});
+      await dealSnap.ref.collection("notes").add({note,previousNote:prevNotes,action:"updated",user:"system:recovery",createdAt:FieldValue.serverTimestamp(),source:"recontact_response"}).catch(()=>{});
+      if(String(deal.stage||"")!==RESPONSE_STAGE)await writeDealAudit(dealId,{action:"stage_changed",field:"stage",from:String(deal.stage||""),to:RESPONSE_STAGE,detail:"Cambio automático por respuesta de Recovery",actorLabel:"system:recovery"},null,"recovery");
       await dealSnap.ref.collection("message_logs").add({type:"recontact_response",status:"responded",campaignId,campaignName:clean(c.name,180),messageSid:clean(inboundSid,180),provider:clean(extra.provider,40),lineId:clean(extra.lineId,120),createdAt:FieldValue.serverTimestamp()}).catch(()=>{});
       await removePhoneWatch(phone,campaignId,dealId);
       matched++;

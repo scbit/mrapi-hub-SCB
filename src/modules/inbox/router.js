@@ -19,6 +19,7 @@ const { PIPELINE_STAGES } = require("../crm/constants");
 const {TARGET_STAGE,sendCotizadoAlert}=require("../crm/cotizado-alert");
 const { visibleOwners, canSeeOwner, isAdminLike } = require("../crm/access");
 const { searchContactsIndexed, searchDealsIndexed } = require("../crm/search-index");
+const {writeDealAudit,writeContactAudit}=require("../crm/audit");
 
 const { markRecontactResponse } = require("../crm/recovery-service");
 
@@ -953,10 +954,11 @@ router.post("/conversations/:id/contact",authRequired,async(req,res)=>{
     if(!snap.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"}); const c=snap.data()||{};
     if(c.contactId)return res.json({ok:true,contactId:String(c.contactId),existing:true,readsEstimate:1,writesEstimate:0});
     const owner=await chooseOwner(req.authUser,req.body?.owner,c.ownerEmail); const contactRef=crmDb.collection("contacts").doc(); const now=FieldValue.serverTimestamp();
-    const data={name:cleanString(req.body?.name||c.contactName||c.profileName||c.waFrom,180),phone:cleanString(req.body?.phone||c.waFrom,80),company:cleanString(req.body?.company||c.companyName,180),email:cleanString(req.body?.email,180).toLowerCase(),owner,source:"MRAPI_HUB",hubConversationId:id,createdAt:now,updatedAt:now};
+    const data={name:cleanString(req.body?.name||c.contactName||c.profileName||c.waFrom,180),phone:cleanString(req.body?.phone||c.waFrom,80),company:cleanString(req.body?.company||c.companyName,180),email:cleanString(req.body?.email,180).toLowerCase(),owner,source:"MRAPI_HUB",hubConversationId:id,createdBy:String(req.authUser?.email||req.authUser?.name||""),createdAt:now,updatedAt:now};
     await contactRef.set(data);
     await ref.set({contactId:contactRef.id,ownerEmail:owner,crmLinked:true,isAssigned:Boolean(owner),updatedAt:FieldValue.serverTimestamp()},{merge:true});
-    return res.json({ok:true,contactId:contactRef.id,readsEstimate:1,writesEstimate:2});
+    const a=await writeContactAudit(contactRef.id,{action:"contact_created",detail:`Contacto creado desde Bandeja: ${data.name}`},req.authUser,"inbox");
+    return res.json({ok:true,contactId:contactRef.id,readsEstimate:1,writesEstimate:2+Number(a.writes||0)});
   }catch(e){return res.status(e.status||500).json({ok:false,error:e.message});}
 });
 router.post("/conversations/:id/deal",authRequired,async(req,res)=>{
@@ -966,9 +968,10 @@ router.post("/conversations/:id/deal",authRequired,async(req,res)=>{
     const owner=await chooseOwner(req.authUser,req.body?.owner,c.ownerEmail); const now=FieldValue.serverTimestamp(); let contactId=cleanString(c.contactId,220); let contactRef=null; let writes=0;
     if(!contactId){contactRef=crmDb.collection("contacts").doc();contactId=contactRef.id;}
     const dealRef=crmDb.collection("deals").doc(); const stage=PIPELINE_STAGES.includes(req.body?.stage)?req.body.stage:"Nuevos Prospectos";
-    const dealData={title:cleanString(req.body?.title||c.contactName||c.companyName||c.waFrom||"Nuevo trato",180),contactId,owner,stage,dealType:"",leadQuality:"",value:0,notes:"",hubConversationId:id,createdAt:now,updatedAt:now};
-    if(contactRef){await contactRef.set({name:cleanString(req.body?.name||c.contactName||c.profileName||c.waFrom,180),phone:cleanString(c.waFrom,80),company:cleanString(c.companyName,180),email:"",owner,source:"MRAPI_HUB",hubConversationId:id,createdAt:now,updatedAt:now});writes++;}
+    const dealData={title:cleanString(req.body?.title||c.contactName||c.companyName||c.waFrom||"Nuevo trato",180),contactId,owner,stage,dealType:"",leadQuality:"",value:0,notes:"",hubConversationId:id,createdBy:String(req.authUser?.email||req.authUser?.name||""),createdAt:now,updatedAt:now};
+    if(contactRef){const contactData={name:cleanString(req.body?.name||c.contactName||c.profileName||c.waFrom,180),phone:cleanString(c.waFrom,80),company:cleanString(c.companyName,180),email:"",owner,source:"MRAPI_HUB",hubConversationId:id,createdBy:String(req.authUser?.email||req.authUser?.name||""),createdAt:now,updatedAt:now};await contactRef.set(contactData);writes++;const ca=await writeContactAudit(contactId,{action:"contact_created",detail:`Contacto creado desde Bandeja: ${contactData.name}`},req.authUser,"inbox");writes+=Number(ca.writes||0);}
     await dealRef.set(dealData);writes++;
+    const da=await writeDealAudit(dealRef.id,{action:"deal_created",field:"stage",to:stage,detail:`Trato creado desde Bandeja: ${dealData.title}`},req.authUser,"inbox");writes+=Number(da.writes||0);
     const convoPatch={contactId,dealIds:FieldValue.arrayUnion(dealRef.id),ownerEmail:owner,crmLinked:true,isAssigned:Boolean(owner),updatedAt:FieldValue.serverTimestamp()};
     if(!cleanString(c.dealId,220)){convoPatch.dealId=dealRef.id;convoPatch.stage=stage;}
     await ref.set(convoPatch,{merge:true});writes++;

@@ -9,6 +9,7 @@ const {PIPELINE_STAGES,DEAL_TYPES,DEAL_TYPE_LABELS,LEAD_QUALITY_VALUES,LEAD_QUAL
 const {visibleOwners,canSeeOwner,canEditOwner,isAdminLike}=require("./access");
 const {searchDealsIndexed,searchContactsIndexed,buildSearchTerms}=require("./search-index");
 const {TARGET_STAGE,sendCotizadoAlert}=require("./cotizado-alert");
+const {writeDealAudit,writeContactAudit,writeDealAudits}=require("./audit");
 const router=express.Router();
 router.use(authRequired);
 
@@ -137,7 +138,8 @@ router.post("/deals/bulk-stage",async(req,res)=>{
     const batch=crmDb.batch(); const now=new Date(); allowed.forEach(d=>batch.update(d.ref,{stage,updatedAt:now})); await batch.commit();
     let syncReads=0,syncWrites=0;
     for(const d of allowed){const r=await syncDealStageToInbox(d.id,stage,d.data()||{});syncReads+=r.reads;syncWrites+=r.writes;}
-    return res.json({ok:true,updated:allowed.length,readsEstimate:docs.length+syncReads,writesEstimate:allowed.length+syncWrites});
+    const audits=await writeDealAudits(allowed.filter(d=>String((d.data()||{}).stage||"")!==stage).map(d=>({dealId:d.id,event:{action:"stage_changed",field:"stage",from:String((d.data()||{}).stage||""),to:stage,detail:"Cambio masivo de etapa"}})),req.authUser,"crm_bulk");
+    return res.json({ok:true,updated:allowed.length,readsEstimate:docs.length+syncReads,writesEstimate:allowed.length+syncWrites+Number(audits.writes||0)});
   }catch(e){return res.status(500).json({ok:false,error:e.message});}
 });
 
@@ -166,7 +168,8 @@ router.post("/deals/bulk-owner",async(req,res)=>{
       const r=await syncDealToInbox(d.id,{owner},{...(d.data()||{}),owner});
       syncReads+=r.reads;syncWrites+=r.writes;
     }
-    return res.json({ok:true,updated:allowed.length,readsEstimate:docs.length+syncReads,writesEstimate:allowed.length+syncWrites});
+    const audits=await writeDealAudits(docs.filter(d=>d.exists&&allowed.some(ref=>ref.path===d.ref.path)&&String((d.data()||{}).owner||"").toLowerCase()!==owner).map(d=>({dealId:d.id,event:{action:"owner_changed",field:"owner",from:String((d.data()||{}).owner||""),to:owner,detail:"Cambio masivo de owner"}})),req.authUser,"crm_bulk");
+    return res.json({ok:true,updated:allowed.length,readsEstimate:docs.length+syncReads,writesEstimate:allowed.length+syncWrites+Number(audits.writes||0)});
   }catch(e){
     console.error("bulk owner",e);
     return res.status(500).json({ok:false,error:e.message});
@@ -276,10 +279,13 @@ router.put("/deals/:id",async(req,res)=>{
       // El cambio del trato ya quedó guardado. Una falla de WhatsApp nunca revierte el CRM.
       whatsappAlert=await sendCotizadoAlert(req.params.id,{...old,...p});
     }
-    if(notesChanged&&String(p.notes||"").trim()){
-      await ref.collection("notes").add({note:String(p.notes||"").trim(),user:String(req.authUser.email||req.authUser.name||"crm"),createdAt:admin.firestore.FieldValue.serverTimestamp()});
+    if(notesChanged){
+      await ref.collection("notes").add({note:String(p.notes||"").trim(),previousNote:String(old.notes||"").trim(),action:String(p.notes||"").trim()?"updated":"cleared",user:String(req.authUser.email||req.authUser.name||"crm"),createdAt:admin.firestore.FieldValue.serverTimestamp()});
       writes++;
     }
+    if(Object.prototype.hasOwnProperty.call(p,"stage")&&String(p.stage||"")!==String(old.stage||"")){const a=await writeDealAudit(req.params.id,{action:"stage_changed",field:"stage",from:String(old.stage||""),to:String(p.stage||"")},req.authUser,"crm");writes+=Number(a.writes||0);}
+    if(Object.prototype.hasOwnProperty.call(p,"owner")&&String(p.owner||"").toLowerCase()!==String(old.owner||"").toLowerCase()){const a=await writeDealAudit(req.params.id,{action:"owner_changed",field:"owner",from:String(old.owner||""),to:String(p.owner||"")},req.authUser,"crm");writes+=Number(a.writes||0);}
+    if(notesChanged){const a=await writeDealAudit(req.params.id,{action:String(p.notes||"").trim()?"note_updated":"note_cleared",field:"notes",detail:String(p.notes||"").trim()?"Nota del CRM modificada":"Nota del CRM eliminada"},req.authUser,"crm");writes+=Number(a.writes||0);}
     return res.json({ok:true,readsEstimate:1+syncReads,writesEstimate:writes,whatsappAlert});
   }catch(e){res.status(500).json({ok:false,error:e.message});}
 });
@@ -291,8 +297,32 @@ router.get("/deals/:id/note-history",async(req,res)=>{
     if(!deal.exists)return res.status(404).json({ok:false,error:"Trato no encontrado"});
     if(!(await canSeeOwner(req.authUser,(deal.data()||{}).owner)))return res.status(403).json({ok:false,error:"Sin permiso"});
     const snap=await dealRef.collection("notes").orderBy("createdAt","desc").limit(30).get();
-    const history=snap.docs.map(d=>{const x=d.data()||{};let date=null;if(x.createdAt?.toDate)date=x.createdAt.toDate();else if(x.createdAt)date=new Date(x.createdAt);return {id:d.id,note:String(x.note||""),user:String(x.user||""),createdAt:date&&!isNaN(date)?date.toISOString():null,createdAtLabel:date&&!isNaN(date)?date.toLocaleString("es-AR"):""};});
+    const history=snap.docs.map(d=>{const x=d.data()||{};let date=null;if(x.createdAt?.toDate)date=x.createdAt.toDate();else if(x.createdAt)date=new Date(x.createdAt);return {id:d.id,note:String(x.note||""),previousNote:String(x.previousNote||""),action:String(x.action||""),user:String(x.user||""),createdAt:date&&!isNaN(date)?date.toISOString():null,createdAtLabel:date&&!isNaN(date)?date.toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"}):""};});
     return res.json({ok:true,history,readsEstimate:1+snap.size});
+  }catch(e){return res.status(500).json({ok:false,error:e.message});}
+});
+
+router.get("/deals/:id/audit-log",async(req,res)=>{
+  try{
+    const dealRef=crmDb.collection("deals").doc(req.params.id);
+    const dealSnap=await dealRef.get();
+    if(!dealSnap.exists)return res.status(404).json({ok:false,error:"Trato no encontrado"});
+    const deal=dealSnap.data()||{};
+    if(!(await canSeeOwner(req.authUser,deal.owner)))return res.status(403).json({ok:false,error:"Sin permiso"});
+    let reads=1;
+    const [dealAudit,contactSnap,contactAudit]=await (async()=>{
+      const da=await dealRef.collection("audit").orderBy("createdAt","desc").limit(60).get();reads+=da.size;
+      let cs=null,ca=null;
+      if(deal.contactId){cs=await crmDb.collection("contacts").doc(String(deal.contactId)).get();reads++;if(cs.exists){ca=await cs.ref.collection("audit").orderBy("createdAt","desc").limit(30).get();reads+=ca.size;}}
+      return [da,cs,ca];
+    })();
+    const mapDoc=(d,entityType)=>{const x=d.data()||{};let date=null;if(x.createdAt?.toDate)date=x.createdAt.toDate();else if(x.createdAt)date=new Date(x.createdAt);return {id:d.id,entityType:String(x.entityType||entityType),action:String(x.action||""),field:String(x.field||""),from:String(x.from||""),to:String(x.to||""),detail:String(x.detail||""),source:String(x.source||""),actorEmail:String(x.actorEmail||""),actorName:String(x.actorName||""),actorLabel:String(x.actorLabel||x.actorEmail||x.actorName||"Sistema"),createdAt:date&&!isNaN(date)?date.toISOString():null,createdAtLabel:date&&!isNaN(date)?date.toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"}):""};};
+    const items=[...dealAudit.docs.map(d=>mapDoc(d,"deal")),...(contactAudit?contactAudit.docs.map(d=>mapDoc(d,"contact")):[])];
+    const hasDealCreate=items.some(x=>x.entityType==="deal"&&x.action==="deal_created");
+    if(!hasDealCreate&&deal.createdAt){const date=deal.createdAt?.toDate?deal.createdAt.toDate():new Date(deal.createdAt);if(!isNaN(date))items.push({id:"synthetic-deal-created",entityType:"deal",action:"deal_created",field:"",from:"",to:"",detail:"Registro histórico anterior al log de auditoría",source:"historical",actorEmail:"",actorName:"",actorLabel:"Histórico · usuario no registrado",createdAt:date.toISOString(),createdAtLabel:date.toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})});}
+    if(contactSnap?.exists){const contact=contactSnap.data()||{};const hasContactCreate=items.some(x=>x.entityType==="contact"&&x.action==="contact_created");if(!hasContactCreate&&contact.createdAt){const date=contact.createdAt?.toDate?contact.createdAt.toDate():new Date(contact.createdAt);if(!isNaN(date))items.push({id:"synthetic-contact-created",entityType:"contact",action:"contact_created",field:"",from:"",to:"",detail:"Registro histórico anterior al log de auditoría",source:"historical",actorEmail:"",actorName:"",actorLabel:"Histórico · usuario no registrado",createdAt:date.toISOString(),createdAtLabel:date.toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})});}}
+    items.sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0));
+    return res.json({ok:true,items:items.slice(0,80),readsEstimate:reads});
   }catch(e){return res.status(500).json({ok:false,error:e.message});}
 });
 
@@ -430,7 +460,9 @@ router.put("/contacts/:id",async(req,res)=>{
       p.owner=owner;
     }
     await ref.update(p);
-    return res.json({ok:true,readsEstimate:1,writesEstimate:1});
+    let writes=1;
+    if(Object.prototype.hasOwnProperty.call(p,"owner")&&String(p.owner||"").toLowerCase()!==String(old.owner||"").toLowerCase()){const a=await writeContactAudit(req.params.id,{action:"owner_changed",field:"owner",from:String(old.owner||""),to:String(p.owner||"")},req.authUser,"crm");writes+=Number(a.writes||0);}
+    return res.json({ok:true,readsEstimate:1,writesEstimate:writes});
   }catch(e){return res.status(500).json({ok:false,error:e.message});}
 });
 

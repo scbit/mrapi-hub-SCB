@@ -46,8 +46,31 @@ async function syncDealToInbox(dealId,changes={},deal={}){
   const hubId=String(deal?.hubConversationId||"").trim();
   let writes=0,reads=0;
   if(hubId){
-    await inboxDb.collection("conversations").doc(hubId).set(patch,{merge:true});
-    return {reads:0,writes:1};
+    // A conversation can have legacy/duplicate documents for the same WhatsApp thread.
+    // Owner filtering happens in Firestore BEFORE those rows are merged, so updating only
+    // hubConversationId can leave the currently-active alias under the previous owner.
+    // On owner/stage changes we patch the direct conversation plus its known aliases.
+    const ids=new Set([hubId]);
+    const mustSyncAliases=Object.prototype.hasOwnProperty.call(changes,"owner")||Object.prototype.hasOwnProperty.call(changes,"stage");
+    if(mustSyncAliases){
+      try{
+        const hubSnap=await inboxDb.collection("conversations").doc(hubId).get();reads++;
+        if(hubSnap.exists){
+          const h=hubSnap.data()||{};
+          for(const id of [...(Array.isArray(h.duplicateConversationIds)?h.duplicateConversationIds:[]),...(Array.isArray(h.relatedConversationIds)?h.relatedConversationIds:[])]){
+            const v=String(id||"").trim();if(v)ids.add(v);
+          }
+        }
+      }catch(e){console.warn("deal sync aliases",e.message||String(e));}
+    }
+    if(ids.size===1){
+      await inboxDb.collection("conversations").doc(hubId).set(patch,{merge:true});
+      return {reads,writes:1};
+    }
+    const batch=inboxDb.batch();
+    for(const id of ids){batch.set(inboxDb.collection("conversations").doc(id),patch,{merge:true});writes++;}
+    await batch.commit();
+    return {reads,writes};
   }
 
   // Legacy fallback only for old deals that do not have hubConversationId.

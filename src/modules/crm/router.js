@@ -31,6 +31,36 @@ function addDaysIso(base,days){const [y,m,d]=String(base).split("-").map(Number)
 function publicDeal(doc,contact){const d=normalizeDoc(doc);return {...d,dueDate:dueDateIso(d.dueDate),contactPhone:String(contact?.phone||d.contactPhone||""),company:String(contact?.company||d.company||"")};}
 function cleanLimit(v,def=50){return Math.max(1,Math.min(100,Number(v||def)||def));}
 
+async function syncDealToInbox(dealId,changes={},deal={}){
+  // IMPORTANT: sync is always MERGE/PATCH. It never replaces a conversation document,
+  // so changing owner/stage/quality/due date/notes cannot erase messages, referral data,
+  // line data, unread state or any other inbox fields.
+  const patch={updatedAt:admin.firestore.FieldValue.serverTimestamp(),crmSyncedAt:admin.firestore.FieldValue.serverTimestamp()};
+  if(Object.prototype.hasOwnProperty.call(changes,"stage")){patch.stage=String(changes.stage||"");patch.crmStageSyncedAt=admin.firestore.FieldValue.serverTimestamp();}
+  if(Object.prototype.hasOwnProperty.call(changes,"owner")){const owner=String(changes.owner||"").trim().toLowerCase();patch.ownerEmail=owner;patch.isAssigned=Boolean(owner);patch.crmOwnerSyncedAt=admin.firestore.FieldValue.serverTimestamp();}
+  if(Object.prototype.hasOwnProperty.call(changes,"dueDate"))patch.crmDueDate=String(changes.dueDate||"");
+  if(Object.prototype.hasOwnProperty.call(changes,"leadQuality"))patch.crmLeadQuality=String(changes.leadQuality||"");
+  if(Object.prototype.hasOwnProperty.call(changes,"notes"))patch.crmNotes=String(changes.notes||"");
+  if(Object.keys(patch).length<=2)return {reads:0,writes:0};
+
+  const hubId=String(deal?.hubConversationId||"").trim();
+  let writes=0,reads=0;
+  if(hubId){
+    await inboxDb.collection("conversations").doc(hubId).set(patch,{merge:true});
+    return {reads:0,writes:1};
+  }
+
+  // Legacy fallback only for old deals that do not have hubConversationId.
+  // Normal/current deals therefore add ZERO Firestore reads to this sync.
+  const found=new Map();
+  const add=async q=>{try{const snap=await q.get();reads+=snap.size;for(const d of snap.docs)found.set(d.id,d.ref);}catch(e){console.warn("deal sync fallback",e.message||String(e));}};
+  await add(inboxDb.collection("conversations").where("dealId","==",dealId).limit(20));
+  await add(inboxDb.collection("conversations").where("dealIds","array-contains",dealId).limit(20));
+  if(found.size){const batch=inboxDb.batch();for(const ref of found.values()){batch.set(ref,patch,{merge:true});writes++;}await batch.commit();}
+  return {reads,writes};
+}
+async function syncDealStageToInbox(dealId,stage,deal={}){return syncDealToInbox(dealId,{stage},deal);}
+
 function sanitizeFilename(v){return String(v||"archivo").replace(/[^a-zA-Z0-9._() -]+/g,"_").replace(/\s+/g," ").trim().slice(-140)||"archivo";}
 function dealFiles(d){return Array.isArray(d?.files)?d.files:[];}
 function isAllowedDealFile(type){return new Set(["application/pdf","image/jpeg","image/png","image/webp"]).has(String(type||"").toLowerCase());}
@@ -79,10 +109,12 @@ router.post("/deals/bulk-stage",async(req,res)=>{
     const ids=Array.from(new Set((Array.isArray(req.body?.ids)?req.body.ids:[]).map(x=>String(x||"").trim()).filter(Boolean))).slice(0,450);
     const stage=String(req.body?.stage||"").trim(); if(!ids.length)return res.status(400).json({ok:false,error:"No hay tratos seleccionados"}); if(!PIPELINE_STAGES.includes(stage))return res.status(400).json({ok:false,error:"Etapa inválida"});
     const refs=ids.map(id=>crmDb.collection("deals").doc(id)); const docs=await crmDb.getAll(...refs); const allowed=[];
-    for(const d of docs){if(d.exists&&await canEditOwner(req.authUser,(d.data()||{}).owner))allowed.push(d.ref);}
+    for(const d of docs){if(d.exists&&await canEditOwner(req.authUser,(d.data()||{}).owner))allowed.push(d);}
     if(!allowed.length)return res.status(403).json({ok:false,error:"Sin permiso sobre los tratos seleccionados"});
-    const batch=crmDb.batch(); const now=new Date(); allowed.forEach(ref=>batch.update(ref,{stage,updatedAt:now})); await batch.commit();
-    return res.json({ok:true,updated:allowed.length,readsEstimate:docs.length,writesEstimate:allowed.length});
+    const batch=crmDb.batch(); const now=new Date(); allowed.forEach(d=>batch.update(d.ref,{stage,updatedAt:now})); await batch.commit();
+    let syncReads=0,syncWrites=0;
+    for(const d of allowed){const r=await syncDealStageToInbox(d.id,stage,d.data()||{});syncReads+=r.reads;syncWrites+=r.writes;}
+    return res.json({ok:true,updated:allowed.length,readsEstimate:docs.length+syncReads,writesEstimate:allowed.length+syncWrites});
   }catch(e){return res.status(500).json({ok:false,error:e.message});}
 });
 
@@ -105,7 +137,13 @@ router.post("/deals/bulk-owner",async(req,res)=>{
     const now=new Date();
     allowed.forEach(ref=>batch.update(ref,{owner,updatedAt:now}));
     await batch.commit();
-    return res.json({ok:true,updated:allowed.length,readsEstimate:docs.length,writesEstimate:allowed.length});
+    let syncReads=0,syncWrites=0;
+    for(const d of docs){
+      if(!d.exists||!allowed.some(ref=>ref.path===d.ref.path))continue;
+      const r=await syncDealToInbox(d.id,{owner},{...(d.data()||{}),owner});
+      syncReads+=r.reads;syncWrites+=r.writes;
+    }
+    return res.json({ok:true,updated:allowed.length,readsEstimate:docs.length+syncReads,writesEstimate:allowed.length+syncWrites});
   }catch(e){
     console.error("bulk owner",e);
     return res.status(500).json({ok:false,error:e.message});
@@ -204,7 +242,12 @@ router.put("/deals/:id",async(req,res)=>{
     const notesChanged=Object.prototype.hasOwnProperty.call(p,"notes")&&String(p.notes||"").trim()!==String(old.notes||"").trim();
     if(Object.prototype.hasOwnProperty.call(p,"title"))p.searchTerms=buildSearchTerms({...old,...p});
     await ref.update(p);
-    let writes=1;
+    let writes=1,syncReads=0;
+    const inboxChanges={};
+    for(const k of ["stage","owner","dueDate","leadQuality","notes"]){
+      if(Object.prototype.hasOwnProperty.call(p,k)&&String(p[k]??"")!==String(old[k]??""))inboxChanges[k]=p[k];
+    }
+    if(Object.keys(inboxChanges).length){const sync=await syncDealToInbox(req.params.id,inboxChanges,{...old,...p});syncReads+=sync.reads;writes+=sync.writes;}
     let whatsappAlert={ok:true,skipped:true,reason:"not_entering_cotizado_para_enviar"};
     if(Object.prototype.hasOwnProperty.call(p,"stage")&&p.stage===TARGET_STAGE&&String(old.stage||"").trim()!==TARGET_STAGE){
       // El cambio del trato ya quedó guardado. Una falla de WhatsApp nunca revierte el CRM.
@@ -214,7 +257,7 @@ router.put("/deals/:id",async(req,res)=>{
       await ref.collection("notes").add({note:String(p.notes||"").trim(),user:String(req.authUser.email||req.authUser.name||"crm"),createdAt:admin.firestore.FieldValue.serverTimestamp()});
       writes++;
     }
-    return res.json({ok:true,readsEstimate:1,writesEstimate:writes,whatsappAlert});
+    return res.json({ok:true,readsEstimate:1+syncReads,writesEstimate:writes,whatsappAlert});
   }catch(e){res.status(500).json({ok:false,error:e.message});}
 });
 

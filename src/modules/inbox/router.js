@@ -603,6 +603,62 @@ async function materializeMedia(conversationId,messageId,index){
 }
 
 
+
+async function unreadConversationDocsByOwners({owners,limit,cursorDoc}){
+  const base=inboxDb.collection("conversations");
+  const wanted=Math.max(10,limit||50);
+  let cursor=cursorDoc||null;
+  let reads=0;
+  let matched=[];
+  let hasMore=true;
+  let safety=0;
+  let lastScanned=cursorDoc||null;
+
+  // Query only unread documents. This avoids scanning thousands of ordinary
+  // conversations when unread chats are sparse.
+  while(matched.length<wanted && hasMore && safety<20){
+    safety++;
+    const fetchSize=Math.min(200,Math.max(50,(wanted-matched.length)*2));
+    let q=base.where("hasUnread","==",true);
+    let usedOwnerQuery=false;
+    try{
+      if(owners.length===1){q=q.where("ownerEmail","==",owners[0]);usedOwnerQuery=true;}
+      else if(owners.length>1 && owners.length<=30){q=q.where("ownerEmail","in",owners);usedOwnerQuery=true;}
+      if(cursor)q=q.startAfter(cursor);
+      q=q.limit(fetchSize);
+      const snap=await q.get();
+      reads+=snap.size;
+      if(!snap.docs.length){hasMore=false;break;}
+      lastScanned=snap.docs[snap.docs.length-1];
+      cursor=lastScanned;
+      let docs=snap.docs;
+      if(!usedOwnerQuery && owners.length){
+        const allowed=new Set(owners.map(x=>String(x||"").toLowerCase()));
+        docs=docs.filter(d=>allowed.has(String((d.data()||{}).ownerEmail||"").toLowerCase()));
+      }
+      matched=mergeConversationSummaries([...matched,...docs.map(summary)]).filter(x=>Number(x.unreadCount||0)>0 || x.hasUnread===true);
+      hasMore=snap.size===fetchSize;
+    }catch(e){
+      // Some Firestore projects may not have an index for ownerEmail + hasUnread.
+      // Fallback still reads ONLY unread docs and filters owners in memory.
+      let fq=base.where("hasUnread","==",true);
+      if(cursor)fq=fq.startAfter(cursor);
+      fq=fq.limit(fetchSize);
+      const snap=await fq.get();
+      reads+=snap.size;
+      if(!snap.docs.length){hasMore=false;break;}
+      lastScanned=snap.docs[snap.docs.length-1];
+      cursor=lastScanned;
+      const allowed=owners.length?new Set(owners.map(x=>String(x||"").toLowerCase())):null;
+      const docs=allowed?snap.docs.filter(d=>allowed.has(String((d.data()||{}).ownerEmail||"").toLowerCase())):snap.docs;
+      matched=mergeConversationSummaries([...matched,...docs.map(summary)]).filter(x=>Number(x.unreadCount||0)>0 || x.hasUnread===true);
+      hasMore=snap.size===fetchSize;
+    }
+  }
+  matched.sort((a,b)=>new Date(b.lastMessageAt||0)-new Date(a.lastMessageAt||0));
+  return {items:matched.slice(0,wanted),reads,hasMore,nextCursor:lastScanned?.id||null};
+}
+
 async function enrichConversationLinksFromCrm(items=[]){
   if(!items.length) return {items,reads:0};
   const idToItem=new Map();
@@ -645,43 +701,10 @@ router.get("/conversations", authRequired, async(req,res)=>{
     }
     const filter=cleanString(req.query.filter,40).toLowerCase();
 
-    // For sparse filters such as "No leídos", fetching 50 generic conversations and
-    // filtering in the browser can yield only 1-2 visible rows per click. When the
-    // unread filter is active, scan forward server-side until we have up to `limit`
-    // matching conversations (or reach the end), and return a cursor at the exact
-    // last scanned document so no unread chats are skipped between pages.
+    // Read unread chats directly instead of scanning the full inbox.
     if(filter==="unread"){
-      let scanCursor=cursorDoc;
-      let reads=cursorRead;
-      let hasMore=true;
-      let matched=[];
-      let nextCursor=cursor||null;
-      let safety=0;
-      while(matched.length<limit && hasMore && safety<100){
-        safety++;
-        const batch=await conversationDocsByOwners({owners,limit,cursorDoc:scanCursor});
-        reads+=batch.reads;
-        if(!batch.docs.length){hasMore=false;break;}
-        for(let i=0;i<batch.docs.length;i++){
-          const doc=batch.docs[i];
-          scanCursor=doc;
-          nextCursor=doc.id;
-          const candidate=summary(doc);
-          // Merge as we advance so duplicate/legacy conversation records count as
-          // one visible conversation, exactly as they do in the UI.
-          const mergedNow=mergeConversationSummaries([...matched,candidate]);
-          matched=mergedNow.filter(x=>Number(x.unreadCount||0)>0);
-          if(matched.length>=limit){
-            // There are still rows after this cursor if this batch has leftovers,
-            // even when Firestore says this was the final full fetch.
-            hasMore=(i<batch.docs.length-1)||batch.hasMore;
-            break;
-          }
-        }
-        if(matched.length>=limit) break;
-        hasMore=batch.hasMore;
-      }
-      return res.json({ok:true,items:matched,nextCursor:nextCursor||null,hasMore,readsEstimate:reads,ownersApplied:owners});
+      const unread=await unreadConversationDocsByOwners({owners,limit,cursorDoc});
+      return res.json({ok:true,items:unread.items,nextCursor:unread.nextCursor,hasMore:unread.hasMore,readsEstimate:unread.reads+cursorRead,ownersApplied:owners});
     }
 
     const loaded=await conversationDocsByOwners({owners,limit,cursorDoc});

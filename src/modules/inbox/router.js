@@ -643,10 +643,50 @@ router.get("/conversations", authRequired, async(req,res)=>{
       const c=await inboxDb.collection("conversations").doc(cursor).get(); cursorRead=1;
       if(c.exists)cursorDoc=c;
     }
+    const filter=cleanString(req.query.filter,40).toLowerCase();
+
+    // For sparse filters such as "No leídos", fetching 50 generic conversations and
+    // filtering in the browser can yield only 1-2 visible rows per click. When the
+    // unread filter is active, scan forward server-side until we have up to `limit`
+    // matching conversations (or reach the end), and return a cursor at the exact
+    // last scanned document so no unread chats are skipped between pages.
+    if(filter==="unread"){
+      let scanCursor=cursorDoc;
+      let reads=cursorRead;
+      let hasMore=true;
+      let matched=[];
+      let nextCursor=cursor||null;
+      let safety=0;
+      while(matched.length<limit && hasMore && safety<100){
+        safety++;
+        const batch=await conversationDocsByOwners({owners,limit,cursorDoc:scanCursor});
+        reads+=batch.reads;
+        if(!batch.docs.length){hasMore=false;break;}
+        for(let i=0;i<batch.docs.length;i++){
+          const doc=batch.docs[i];
+          scanCursor=doc;
+          nextCursor=doc.id;
+          const candidate=summary(doc);
+          // Merge as we advance so duplicate/legacy conversation records count as
+          // one visible conversation, exactly as they do in the UI.
+          const mergedNow=mergeConversationSummaries([...matched,candidate]);
+          matched=mergedNow.filter(x=>Number(x.unreadCount||0)>0);
+          if(matched.length>=limit){
+            // There are still rows after this cursor if this batch has leftovers,
+            // even when Firestore says this was the final full fetch.
+            hasMore=(i<batch.docs.length-1)||batch.hasMore;
+            break;
+          }
+        }
+        if(matched.length>=limit) break;
+        hasMore=batch.hasMore;
+      }
+      return res.json({ok:true,items:matched,nextCursor:nextCursor||null,hasMore,readsEstimate:reads,ownersApplied:owners});
+    }
+
     const loaded=await conversationDocsByOwners({owners,limit,cursorDoc});
     let items=mergeConversationSummaries(loaded.docs.map(summary));
     let extraReads=0;
-    const filter=cleanString(req.query.filter,40).toLowerCase();
     if(filter==="new"){
       // Legacy chats may not carry dealId/contactId even though the CRM deal points
       // back to them through hubConversationId. Enrich before filtering so "Nuevos /

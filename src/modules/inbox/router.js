@@ -514,6 +514,16 @@ async function loadConversationForSend(id){
 async function updateAfterSend(ref, text, mediaCount, status){
   await ref.set({lastMessageAt:FieldValue.serverTimestamp(),lastMessagePreview:preview(text,mediaCount),updatedAt:FieldValue.serverTimestamp(),lastDeliveryStatus:status||"queued",lastMessageDirection:"OUT",lastHumanMessageAt:FieldValue.serverTimestamp(),hasUnread:false,unreadCount:0,manualUnread:false,lastReadAt:FieldValue.serverTimestamp(),lastReadBy:"human-send"},{merge:true});
 }
+async function clearUnreadConversationGroup(id,readBy="human-send"){
+  const resolved=await resolveConversationGroup(id);
+  const refs=(resolved.snaps||[]).map(s=>s.ref);
+  if(!refs.length) refs.push(inboxDb.collection("conversations").doc(id));
+  const batch=inboxDb.batch();
+  const patch={hasUnread:false,unreadCount:0,manualUnread:false,lastReadAt:FieldValue.serverTimestamp(),lastReadBy:readBy};
+  refs.forEach(ref=>batch.set(ref,patch,{merge:true}));
+  await batch.commit();
+  return {writes:refs.length,reads:resolved.reads||0};
+}
 async function parseSingleUpload(req){
   return new Promise((resolve,reject)=>{
     const bb=Busboy({headers:req.headers,limits:{fileSize:15*1024*1024,files:1}}); let text=""; let fileData=null; let limited=false;
@@ -592,6 +602,35 @@ async function materializeMedia(conversationId,messageId,index){
   return {url:await signedMediaUrl(media[index]),item:media[index],reads:1,writes:1};
 }
 
+
+async function enrichConversationLinksFromCrm(items=[]){
+  if(!items.length) return {items,reads:0};
+  const idToItem=new Map();
+  for(const item of items){
+    for(const id of uniqueStrings([item.id,...(item.relatedConversationIds||[]),...(item.duplicateConversationIds||[])])) idToItem.set(id,item);
+  }
+  let reads=0;
+  for(const chunk of chunkValues([...idToItem.keys()],30)){
+    if(!chunk.length) continue;
+    try{
+      const ds=await crmDb.collection("deals").where("hubConversationId","in",chunk).limit(200).get();
+      reads+=ds.size;
+      for(const doc of ds.docs){
+        const d=doc.data()||{};
+        const item=idToItem.get(String(d.hubConversationId||""));
+        if(!item) continue;
+        item.dealIds=uniqueStrings([...(item.dealIds||[]),doc.id]);
+        if(d.contactId) item.contactIds=uniqueStrings([...(item.contactIds||[]),d.contactId]);
+        item.dealId=item.dealIds[0]||item.dealId||"";
+        item.contactId=item.contactIds?.[0]||item.contactId||"";
+        item.isLinked=true;
+        if(!String(item.stage||"").trim() && d.stage) item.stage=d.stage;
+      }
+    }catch(e){console.warn("inbox list CRM linkage enrichment",e.message||String(e));}
+  }
+  return {items,reads};
+}
+
 router.get("/conversations", authRequired, async(req,res)=>{
   try{
     const requested=Number(req.query.limit||config.inboxPageSize);
@@ -605,9 +644,19 @@ router.get("/conversations", authRequired, async(req,res)=>{
       if(c.exists)cursorDoc=c;
     }
     const loaded=await conversationDocsByOwners({owners,limit,cursorDoc});
-    const items=mergeConversationSummaries(loaded.docs.map(summary));
+    let items=mergeConversationSummaries(loaded.docs.map(summary));
+    let extraReads=0;
+    const filter=cleanString(req.query.filter,40).toLowerCase();
+    if(filter==="new"){
+      // Legacy chats may not carry dealId/contactId even though the CRM deal points
+      // back to them through hubConversationId. Enrich before filtering so "Nuevos /
+      // sin asignar" never resurrects already-linked chats on page 2+.
+      const enriched=await enrichConversationLinksFromCrm(items);
+      items=enriched.items.filter(x=>!x.isLinked && !String(x.contactId||"").trim() && !String(x.dealId||"").trim() && !(x.contactIds||[]).length && !(x.dealIds||[]).length);
+      extraReads=enriched.reads;
+    }
     const last=loaded.docs[loaded.docs.length-1];
-    return res.json({ok:true,items,nextCursor:last?.id||null,hasMore:loaded.hasMore,readsEstimate:loaded.reads+cursorRead,ownersApplied:owners});
+    return res.json({ok:true,items,nextCursor:last?.id||null,hasMore:loaded.hasMore,readsEstimate:loaded.reads+cursorRead+extraReads,ownersApplied:owners});
   }catch(e){
     console.error("inbox list",e);
     if(e.status===403)return res.status(403).json({ok:false,error:e.message});
@@ -1070,8 +1119,8 @@ router.post("/conversations/:id/mode",authRequired,async(req,res)=>{
 router.post("/conversations/:id/read",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);
-    await inboxDb.collection("conversations").doc(id).set({hasUnread:false,unreadCount:0,manualUnread:false,lastReadAt:FieldValue.serverTimestamp(),lastReadBy:req.authUser.email||req.authUser.id},{merge:true});
-    return res.json({ok:true,writesEstimate:1});
+    const cleared=await clearUnreadConversationGroup(id,req.authUser.email||req.authUser.id);
+    return res.json({ok:true,writesEstimate:cleared.writes,readsEstimate:cleared.reads});
   }catch(e){ console.error("inbox read",e); return res.status(500).json({ok:false,error:e.message}); }
 });
 router.post("/conversations/:id/unread",authRequired,async(req,res)=>{
@@ -1142,7 +1191,7 @@ router.post("/conversations/:id/send",authRequired,async(req,res)=>{
       ? await wa.sendGatewayText({tenantId:route.gatewayTenantId,lineId:route.gatewayLineId,to,body:text})
       : await wa.sendText({from,to,body:text,req,conversationId:id});
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
-    await updateAfterSend(c.ref,text,0,sent.status); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,status:sent.status||"queued",readsEstimate:1,writesEstimate:3});
+    await updateAfterSend(c.ref,text,0,sent.status); const unreadClear=await clearUnreadConversationGroup(id,"human-send"); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,status:sent.status||"queued",readsEstimate:1+Number(unreadClear.reads||0),writesEstimate:3+Number(unreadClear.writes||0)});
   }catch(e){console.error("send",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });
 
@@ -1162,7 +1211,7 @@ router.post("/conversations/:id/send-file",authRequired,async(req,res)=>{
       sent=await wa.sendText({from,to,body:parsed.text,mediaUrls:media.map(x=>x.url),req,conversationId:id});
     }
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text:parsed.text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:media.length,media,deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
-    await updateAfterSend(c.ref,parsed.text,media.length,sent.status); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,mediaCount:media.length,readsEstimate:1,writesEstimate:3});
+    await updateAfterSend(c.ref,parsed.text,media.length,sent.status); const unreadClear=await clearUnreadConversationGroup(id,"human-send"); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,mediaCount:media.length,readsEstimate:1+Number(unreadClear.reads||0),writesEstimate:3+Number(unreadClear.writes||0)});
   }catch(e){console.error("send-file",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });
 

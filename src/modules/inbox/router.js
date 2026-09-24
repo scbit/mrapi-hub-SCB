@@ -19,6 +19,7 @@ const { PIPELINE_STAGES } = require("../crm/constants");
 const {TARGET_STAGE,sendCotizadoAlert}=require("../crm/cotizado-alert");
 const { visibleOwners, canSeeOwner, isAdminLike } = require("../crm/access");
 const { searchContactsIndexed, searchDealsIndexed } = require("../crm/search-index");
+const {writeDealAudit,writeContactAudit}=require("../crm/audit");
 
 const { markRecontactResponse } = require("../crm/recovery-service");
 
@@ -514,6 +515,16 @@ async function loadConversationForSend(id){
 async function updateAfterSend(ref, text, mediaCount, status){
   await ref.set({lastMessageAt:FieldValue.serverTimestamp(),lastMessagePreview:preview(text,mediaCount),updatedAt:FieldValue.serverTimestamp(),lastDeliveryStatus:status||"queued",lastMessageDirection:"OUT",lastHumanMessageAt:FieldValue.serverTimestamp(),hasUnread:false,unreadCount:0,manualUnread:false,lastReadAt:FieldValue.serverTimestamp(),lastReadBy:"human-send"},{merge:true});
 }
+async function clearUnreadConversationGroup(id,readBy="human-send"){
+  const resolved=await resolveConversationGroup(id);
+  const refs=(resolved.snaps||[]).map(s=>s.ref);
+  if(!refs.length) refs.push(inboxDb.collection("conversations").doc(id));
+  const batch=inboxDb.batch();
+  const patch={hasUnread:false,unreadCount:0,manualUnread:false,lastReadAt:FieldValue.serverTimestamp(),lastReadBy:readBy};
+  refs.forEach(ref=>batch.set(ref,patch,{merge:true}));
+  await batch.commit();
+  return {writes:refs.length,reads:resolved.reads||0};
+}
 async function parseSingleUpload(req){
   return new Promise((resolve,reject)=>{
     const bb=Busboy({headers:req.headers,limits:{fileSize:15*1024*1024,files:1}}); let text=""; let fileData=null; let limited=false;
@@ -592,49 +603,131 @@ async function materializeMedia(conversationId,messageId,index){
   return {url:await signedMediaUrl(media[index]),item:media[index],reads:1,writes:1};
 }
 
+
+
+async function unreadConversationDocsByOwners({owners}){
+  const base=inboxDb.collection("conversations");
+  let reads=0;
+  const docs=[];
+  let cursor=null;
+  const pageSize=500;
+
+  // v1.5.87: No leídos debe devolver TODO en una sola carga.
+  // Leemos únicamente documentos marcados como unread (no toda la bandeja),
+  // paginando internamente por documentId para no depender de un botón "ver más".
+  for(let safety=0;safety<100;safety++){
+    let q=base.where("hasUnread","==",true)
+      .orderBy(admin.firestore.FieldPath.documentId())
+      .limit(pageSize);
+    if(cursor)q=q.startAfter(cursor);
+    const snap=await q.get();
+    reads+=snap.size;
+    if(!snap.size)break;
+    docs.push(...snap.docs);
+    cursor=snap.docs[snap.docs.length-1];
+    if(snap.size<pageSize)break;
+  }
+
+  let items=mergeConversationSummaries(docs.map(summary))
+    .filter(x=>Number(x.unreadCount||0)>0 || x.hasUnread===true);
+
+  // El owner puede vivir en otro alias físico del mismo cliente+línea.
+  // Si hay filtro de owner, resolvemos el grupo completo ANTES de filtrar para
+  // evitar que un alias unread sin owner o con owner viejo oculte la conversación.
+  if(owners.length && items.length){
+    const allowed=new Set(owners.map(x=>String(x||"").toLowerCase()));
+    const resolvedItems=[];
+    const batchSize=8;
+    for(let i=0;i<items.length;i+=batchSize){
+      const chunk=items.slice(i,i+batchSize);
+      const resolved=await Promise.all(chunk.map(async item=>{
+        try{
+          const group=await resolveConversationGroup(item.id);
+          reads+=Number(group.reads||0);
+          const merged=group.item||item;
+          // Mantener el unread real que originó esta carga aunque el alias principal
+          // no lo tenga marcado.
+          merged.unreadCount=Math.max(Number(merged.unreadCount||0),Number(item.unreadCount||0));
+          merged.hasUnread=merged.unreadCount>0 || item.hasUnread===true;
+          return merged;
+        }catch(e){
+          console.warn("unread owner group resolve",item.id,e.message||String(e));
+          return item;
+        }
+      }));
+      resolvedItems.push(...resolved);
+    }
+    items=mergeConversationSummaries(resolvedItems).filter(x=>{
+      const owner=String(x.ownerEmail||"").toLowerCase();
+      return (Number(x.unreadCount||0)>0 || x.hasUnread===true) && allowed.has(owner);
+    });
+  }
+
+  items.sort((a,b)=>new Date(b.lastMessageAt||0)-new Date(a.lastMessageAt||0));
+  return {items,reads,hasMore:false,nextCursor:null};
+}
+
+async function enrichConversationLinksFromCrm(items=[]){
+  if(!items.length) return {items,reads:0};
+  const idToItem=new Map();
+  for(const item of items){
+    for(const id of uniqueStrings([item.id,...(item.relatedConversationIds||[]),...(item.duplicateConversationIds||[])])) idToItem.set(id,item);
+  }
+  let reads=0;
+  for(const chunk of chunkValues([...idToItem.keys()],30)){
+    if(!chunk.length) continue;
+    try{
+      const ds=await crmDb.collection("deals").where("hubConversationId","in",chunk).limit(200).get();
+      reads+=ds.size;
+      for(const doc of ds.docs){
+        const d=doc.data()||{};
+        const item=idToItem.get(String(d.hubConversationId||""));
+        if(!item) continue;
+        item.dealIds=uniqueStrings([...(item.dealIds||[]),doc.id]);
+        if(d.contactId) item.contactIds=uniqueStrings([...(item.contactIds||[]),d.contactId]);
+        item.dealId=item.dealIds[0]||item.dealId||"";
+        item.contactId=item.contactIds?.[0]||item.contactId||"";
+        item.isLinked=true;
+        if(!String(item.stage||"").trim() && d.stage) item.stage=d.stage;
+      }
+    }catch(e){console.warn("inbox list CRM linkage enrichment",e.message||String(e));}
+  }
+  return {items,reads};
+}
+
 router.get("/conversations", authRequired, async(req,res)=>{
   try{
     const requested=Number(req.query.limit||config.inboxPageSize);
     const limit=Math.max(10,Math.min(requested,config.inboxMaxPageSize));
     const visible=await visibleOwners(req.authUser);
     const owners=ownerFilterValues(req,visible);
-    const unreadOwnerMode=String(req.query.unread||"")==="1" && owners.length>0;
     const cursor=cleanString(req.query.cursor,220);
     let cursorDoc=null,cursorRead=0;
-    if(cursor&&!unreadOwnerMode){
+    if(cursor){
       const c=await inboxDb.collection("conversations").doc(cursor).get(); cursorRead=1;
       if(c.exists)cursorDoc=c;
     }
+    const filter=cleanString(req.query.filter,40).toLowerCase();
 
-    // v1.5.77: al combinar No leídos + Owners no se puede filtrar primero por
-    // owner físico y después hacer merge. En datos legacy, un alias puede tener
-    // ownerEmail y otro alias del mismo cliente+línea puede tener el unreadCount.
-    // Unimos ambos conjuntos ANTES del merge canónico y recién después aplicamos owner.
-    if(unreadOwnerMode){
-      const ownerHydrateLimit=Math.min(Math.max(limit*2,100),200);
-      const ownerLoaded=await conversationDocsByOwners({owners,limit:ownerHydrateLimit,cursorDoc:null});
-      let unreadSnap;
-      try{
-        unreadSnap=await inboxDb.collection("conversations").where("unreadCount",">",0).limit(250).get();
-      }catch(err){
-        console.warn("unread owner hydration",err.message||String(err));
-        unreadSnap={docs:[],size:0};
-      }
-      const docs=new Map();
-      for(const d of ownerLoaded.docs)docs.set(d.id,d);
-      for(const d of unreadSnap.docs||[])docs.set(d.id,d);
-      let items=mergeConversationSummaries([...docs.values()].map(summary));
-      const allowed=new Set(owners.map(x=>String(x||"").toLowerCase()));
-      items=items.filter(x=>Number(x.unreadCount||0)>0 && allowed.has(String(x.ownerEmail||"").toLowerCase()));
-      items.sort((a,b)=>summaryTimeMs(b)-summaryTimeMs(a));
-      const page=items.slice(0,limit);
-      return res.json({ok:true,items:page,nextCursor:null,hasMore:false,readsEstimate:ownerLoaded.reads+Number(unreadSnap.size||0),ownersApplied:owners,unreadOwnerMode:true});
+    // Read unread chats directly instead of scanning the full inbox.
+    if(filter==="unread"){
+      const unread=await unreadConversationDocsByOwners({owners});
+      return res.json({ok:true,items:unread.items,nextCursor:unread.nextCursor,hasMore:unread.hasMore,readsEstimate:unread.reads+cursorRead,ownersApplied:owners});
     }
 
     const loaded=await conversationDocsByOwners({owners,limit,cursorDoc});
-    const items=mergeConversationSummaries(loaded.docs.map(summary));
+    let items=mergeConversationSummaries(loaded.docs.map(summary));
+    let extraReads=0;
+    if(filter==="new"){
+      // Legacy chats may not carry dealId/contactId even though the CRM deal points
+      // back to them through hubConversationId. Enrich before filtering so "Nuevos /
+      // sin asignar" never resurrects already-linked chats on page 2+.
+      const enriched=await enrichConversationLinksFromCrm(items);
+      items=enriched.items.filter(x=>!x.isLinked && !String(x.contactId||"").trim() && !String(x.dealId||"").trim() && !(x.contactIds||[]).length && !(x.dealIds||[]).length);
+      extraReads=enriched.reads;
+    }
     const last=loaded.docs[loaded.docs.length-1];
-    return res.json({ok:true,items,nextCursor:last?.id||null,hasMore:loaded.hasMore,readsEstimate:loaded.reads+cursorRead,ownersApplied:owners});
+    return res.json({ok:true,items,nextCursor:last?.id||null,hasMore:loaded.hasMore,readsEstimate:loaded.reads+cursorRead+extraReads,ownersApplied:owners});
   }catch(e){
     console.error("inbox list",e);
     if(e.status===403)return res.status(403).json({ok:false,error:e.message});
@@ -868,10 +961,11 @@ router.post("/conversations/:id/contact",authRequired,async(req,res)=>{
     if(!snap.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"}); const c=snap.data()||{};
     if(c.contactId)return res.json({ok:true,contactId:String(c.contactId),existing:true,readsEstimate:1,writesEstimate:0});
     const owner=await chooseOwner(req.authUser,req.body?.owner,c.ownerEmail); const contactRef=crmDb.collection("contacts").doc(); const now=FieldValue.serverTimestamp();
-    const data={name:cleanString(req.body?.name||c.contactName||c.profileName||c.waFrom,180),phone:cleanString(req.body?.phone||c.waFrom,80),company:cleanString(req.body?.company||c.companyName,180),email:cleanString(req.body?.email,180).toLowerCase(),owner,source:"MRAPI_HUB",hubConversationId:id,createdAt:now,updatedAt:now};
+    const data={name:cleanString(req.body?.name||c.contactName||c.profileName||c.waFrom,180),phone:cleanString(req.body?.phone||c.waFrom,80),company:cleanString(req.body?.company||c.companyName,180),email:cleanString(req.body?.email,180).toLowerCase(),owner,source:"MRAPI_HUB",hubConversationId:id,createdBy:String(req.authUser?.email||req.authUser?.name||""),createdAt:now,updatedAt:now};
     await contactRef.set(data);
     await ref.set({contactId:contactRef.id,ownerEmail:owner,crmLinked:true,isAssigned:Boolean(owner),updatedAt:FieldValue.serverTimestamp()},{merge:true});
-    return res.json({ok:true,contactId:contactRef.id,readsEstimate:1,writesEstimate:2});
+    const a=await writeContactAudit(contactRef.id,{action:"contact_created",detail:`Contacto creado desde Bandeja: ${data.name}`},req.authUser,"inbox");
+    return res.json({ok:true,contactId:contactRef.id,readsEstimate:1,writesEstimate:2+Number(a.writes||0)});
   }catch(e){return res.status(e.status||500).json({ok:false,error:e.message});}
 });
 router.post("/conversations/:id/deal",authRequired,async(req,res)=>{
@@ -881,9 +975,10 @@ router.post("/conversations/:id/deal",authRequired,async(req,res)=>{
     const owner=await chooseOwner(req.authUser,req.body?.owner,c.ownerEmail); const now=FieldValue.serverTimestamp(); let contactId=cleanString(c.contactId,220); let contactRef=null; let writes=0;
     if(!contactId){contactRef=crmDb.collection("contacts").doc();contactId=contactRef.id;}
     const dealRef=crmDb.collection("deals").doc(); const stage=PIPELINE_STAGES.includes(req.body?.stage)?req.body.stage:"Nuevos Prospectos";
-    const dealData={title:cleanString(req.body?.title||c.contactName||c.companyName||c.waFrom||"Nuevo trato",180),contactId,owner,stage,dealType:"",leadQuality:"",value:0,notes:"",hubConversationId:id,createdAt:now,updatedAt:now};
-    if(contactRef){await contactRef.set({name:cleanString(req.body?.name||c.contactName||c.profileName||c.waFrom,180),phone:cleanString(c.waFrom,80),company:cleanString(c.companyName,180),email:"",owner,source:"MRAPI_HUB",hubConversationId:id,createdAt:now,updatedAt:now});writes++;}
+    const dealData={title:cleanString(req.body?.title||c.contactName||c.companyName||c.waFrom||"Nuevo trato",180),contactId,owner,stage,dealType:"",leadQuality:"",value:0,notes:"",hubConversationId:id,createdBy:String(req.authUser?.email||req.authUser?.name||""),createdAt:now,updatedAt:now};
+    if(contactRef){const contactData={name:cleanString(req.body?.name||c.contactName||c.profileName||c.waFrom,180),phone:cleanString(c.waFrom,80),company:cleanString(c.companyName,180),email:"",owner,source:"MRAPI_HUB",hubConversationId:id,createdBy:String(req.authUser?.email||req.authUser?.name||""),createdAt:now,updatedAt:now};await contactRef.set(contactData);writes++;const ca=await writeContactAudit(contactId,{action:"contact_created",detail:`Contacto creado desde Bandeja: ${contactData.name}`},req.authUser,"inbox");writes+=Number(ca.writes||0);}
     await dealRef.set(dealData);writes++;
+    const da=await writeDealAudit(dealRef.id,{action:"deal_created",field:"stage",to:stage,detail:`Trato creado desde Bandeja: ${dealData.title}`},req.authUser,"inbox");writes+=Number(da.writes||0);
     const convoPatch={contactId,dealIds:FieldValue.arrayUnion(dealRef.id),ownerEmail:owner,crmLinked:true,isAssigned:Boolean(owner),updatedAt:FieldValue.serverTimestamp()};
     if(!cleanString(c.dealId,220)){convoPatch.dealId=dealRef.id;convoPatch.stage=stage;}
     await ref.set(convoPatch,{merge:true});writes++;
@@ -1097,8 +1192,8 @@ router.post("/conversations/:id/mode",authRequired,async(req,res)=>{
 router.post("/conversations/:id/read",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);
-    await inboxDb.collection("conversations").doc(id).set({hasUnread:false,unreadCount:0,manualUnread:false,lastReadAt:FieldValue.serverTimestamp(),lastReadBy:req.authUser.email||req.authUser.id},{merge:true});
-    return res.json({ok:true,writesEstimate:1});
+    const cleared=await clearUnreadConversationGroup(id,req.authUser.email||req.authUser.id);
+    return res.json({ok:true,writesEstimate:cleared.writes,readsEstimate:cleared.reads});
   }catch(e){ console.error("inbox read",e); return res.status(500).json({ok:false,error:e.message}); }
 });
 router.post("/conversations/:id/unread",authRequired,async(req,res)=>{
@@ -1169,7 +1264,7 @@ router.post("/conversations/:id/send",authRequired,async(req,res)=>{
       ? await wa.sendGatewayText({tenantId:route.gatewayTenantId,lineId:route.gatewayLineId,to,body:text})
       : await wa.sendText({from,to,body:text,req,conversationId:id});
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:0,media:[],deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
-    await updateAfterSend(c.ref,text,0,sent.status); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,status:sent.status||"queued",readsEstimate:1,writesEstimate:3});
+    await updateAfterSend(c.ref,text,0,sent.status); const unreadClear=await clearUnreadConversationGroup(id,"human-send"); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,status:sent.status||"queued",readsEstimate:1+Number(unreadClear.reads||0),writesEstimate:3+Number(unreadClear.writes||0)});
   }catch(e){console.error("send",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });
 
@@ -1189,7 +1284,7 @@ router.post("/conversations/:id/send-file",authRequired,async(req,res)=>{
       sent=await wa.sendText({from,to,body:parsed.text,mediaUrls:media.map(x=>x.url),req,conversationId:id});
     }
     await saveOutbound(c.ref,sent.sid,{direction:"OUT",text:parsed.text,source:"human",timestamp:FieldValue.serverTimestamp(),from:wa.ensureWhatsappPrefix(from),to:wa.ensureWhatsappPrefix(to),messageSid:sent.sid,numMedia:media.length,media,deliveryStatus:sent.status||"queued",sentBy:req.authUser.name||req.authUser.email||req.authUser.id,sentByName:req.authUser.name||"",sentByEmail:req.authUser.email||"",sentByUserId:req.authUser.id||"",senderName:req.authUser.name||req.authUser.email||"",senderEmail:req.authUser.email||""});
-    await updateAfterSend(c.ref,parsed.text,media.length,sent.status); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,mediaCount:media.length,readsEstimate:1,writesEstimate:3});
+    await updateAfterSend(c.ref,parsed.text,media.length,sent.status); const unreadClear=await clearUnreadConversationGroup(id,"human-send"); await touchLine(from,{source:"outbound"}); return res.json({ok:true,sid:sent.sid,mediaCount:media.length,readsEstimate:1+Number(unreadClear.reads||0),writesEstimate:3+Number(unreadClear.writes||0)});
   }catch(e){console.error("send-file",e);return res.status(e.status||500).json({ok:false,error:e.message});}
 });
 

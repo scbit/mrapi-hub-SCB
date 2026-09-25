@@ -667,6 +667,8 @@ async function enrichConversationLinksFromCrm(items=[]){
     for(const id of uniqueStrings([item.id,...(item.relatedConversationIds||[]),...(item.duplicateConversationIds||[])])) idToItem.set(id,item);
   }
   let reads=0;
+
+  // 1) Fuente directa: deals que apuntan al chat/alias mediante hubConversationId.
   for(const chunk of chunkValues([...idToItem.keys()],30)){
     if(!chunk.length) continue;
     try{
@@ -684,6 +686,41 @@ async function enrichConversationLinksFromCrm(items=[]){
         if(!String(item.stage||"").trim() && d.stage) item.stage=d.stage;
       }
     }catch(e){console.warn("inbox list CRM linkage enrichment",e.message||String(e));}
+  }
+
+  // 2) v1.5.89: el lateral CRM usa además el índice por teléfono como último fallback.
+  // El filtro "Nuevos / sin asignar" tiene que usar la MISMA verdad antes de mostrar
+  // una conversación; de lo contrario el chat aparece como nuevo y desaparece recién
+  // al abrirlo, cuando crm-summary descubre el trato. Sólo hacemos estas búsquedas para
+  // items que siguen sin vínculo y únicamente dentro del filtro "new".
+  const unresolved=items.filter(item=>{
+    const hasContact=Boolean(String(item.contactId||"").trim() || (item.contactIds||[]).length);
+    const hasDeal=Boolean(String(item.dealId||"").trim() || (item.dealIds||[]).length);
+    return !item.isLinked && !hasContact && !hasDeal;
+  });
+  for(const batch of chunkValues(unresolved,10)){
+    const results=await Promise.all(batch.map(async item=>{
+      const phone=digits(item.waFrom||item.customerPhone||item.phone||item.from||item.contactPhone||"");
+      if(phone.length<7) return {item,found:null,reads:0};
+      try{
+        const found=await searchDealsIndexed(phone,1);
+        return {item,found:found.docs?.[0]||null,reads:Number(found.reads||0)};
+      }catch(e){
+        console.warn("inbox new-filter phone CRM enrichment",phone,e.message||String(e));
+        return {item,found:null,reads:0};
+      }
+    }));
+    for(const r of results){
+      reads+=r.reads;
+      if(!r.found) continue;
+      const d=r.found.data()||{};
+      r.item.dealIds=uniqueStrings([...(r.item.dealIds||[]),r.found.id]);
+      if(d.contactId) r.item.contactIds=uniqueStrings([...(r.item.contactIds||[]),d.contactId]);
+      r.item.dealId=r.item.dealIds[0]||r.item.dealId||"";
+      r.item.contactId=r.item.contactIds?.[0]||r.item.contactId||"";
+      r.item.isLinked=true;
+      if(!String(r.item.stage||"").trim() && d.stage) r.item.stage=d.stage;
+    }
   }
   return {items,reads};
 }

@@ -749,12 +749,56 @@ router.get("/conversations", authRequired, async(req,res)=>{
     let items=mergeConversationSummaries(loaded.docs.map(summary));
     let extraReads=0;
     if(filter==="new"){
-      // Legacy chats may not carry dealId/contactId even though the CRM deal points
-      // back to them through hubConversationId. Enrich before filtering so "Nuevos /
-      // sin asignar" never resurrects already-linked chats on page 2+.
-      const enriched=await enrichConversationLinksFromCrm(items);
-      items=enriched.items.filter(x=>!x.isLinked && !String(x.contactId||"").trim() && !String(x.dealId||"").trim() && !(x.contactIds||[]).length && !(x.dealIds||[]).length);
-      extraReads=enriched.reads;
+      // v1.5.90: "Nuevos / sin asignar" debe usar exactamente la misma verdad
+      // que el lateral CRM al abrir un chat. Antes filtrábamos sólo con el resumen
+      // cargado en la lista; al hacer click resolveConversationGroup encontraba aliases
+      // legacy con dealId/contactId y el chat recién entonces desaparecía.
+      // Ahora resolvemos el grupo completo (cliente + línea) ANTES de decidir si entra.
+      const verified=[];
+      for(const batch of chunkValues(items,8)){
+        const checks=await Promise.all(batch.map(async item=>{
+          try{
+            const resolved=await resolveConversationGroup(item.id);
+            let reads=Number(resolved.reads||0);
+            const convos=resolved.snaps||[];
+            const merged=resolved.item||item;
+            const contactIds=uniqueStrings(convos.flatMap(doc=>{const x=doc.data()||{};return [x.contactId,...(Array.isArray(x.contactIds)?x.contactIds:[])];}));
+            const dealIds=uniqueStrings(convos.flatMap(doc=>{const x=doc.data()||{};return [x.dealId,...(Array.isArray(x.dealIds)?x.dealIds:[])];}));
+            if(contactIds.length || dealIds.length || merged.isLinked) return {item:merged,linked:true,reads};
+
+            const hubIds=uniqueStrings([
+              item.id,
+              ...convos.map(d=>d.id),
+              ...(Array.isArray(merged.relatedConversationIds)?merged.relatedConversationIds:[]),
+              ...(Array.isArray(merged.duplicateConversationIds)?merged.duplicateConversationIds:[])
+            ]).slice(0,90);
+            for(const chunk of chunkValues(hubIds,30)){
+              if(!chunk.length) continue;
+              try{
+                const ds=await crmDb.collection("deals").where("hubConversationId","in",chunk).limit(1).get();
+                reads+=ds.size;
+                if(!ds.empty) return {item:merged,linked:true,reads};
+              }catch(e){console.warn("inbox new-filter hubConversationId verify",e.message||String(e));}
+            }
+
+            const phone=digits(resolved.customer||merged.waFrom||merged.customerPhone||merged.phone||merged.from||merged.contactPhone||"");
+            if(phone.length>=7){
+              try{
+                const found=await searchDealsIndexed(phone,1);
+                reads+=Number(found.reads||0);
+                if(found.docs?.length) return {item:merged,linked:true,reads};
+              }catch(e){console.warn("inbox new-filter indexed verify",phone,e.message||String(e));}
+            }
+            return {item:merged,linked:false,reads};
+          }catch(e){
+            console.warn("inbox new-filter full verify",item.id,e.message||String(e));
+            // Ante una falla de resolución no lo mostramos como "nuevo" por seguridad.
+            return {item,linked:true,reads:0};
+          }
+        }));
+        for(const c of checks){ extraReads+=Number(c.reads||0); if(!c.linked) verified.push(c.item); }
+      }
+      items=verified;
     }
     const last=loaded.docs[loaded.docs.length-1];
     return res.json({ok:true,items,nextCursor:last?.id||null,hasMore:loaded.hasMore,readsEstimate:loaded.reads+cursorRead+extraReads,ownersApplied:owners});

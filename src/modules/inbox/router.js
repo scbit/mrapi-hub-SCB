@@ -509,7 +509,7 @@ async function saveOutbound(convoRef, sid, payload){ await convoRef.collection("
 async function loadConversationForSend(id){
   const ref=inboxDb.collection("conversations").doc(id); const snap=await ref.get();
   if(!snap.exists){ const e=new Error("Conversación no encontrada"); e.status=404; throw e; }
-  const d=snap.data()||{}; if(normalizeMode(d.mode)!=="HUMAN"){ const e=new Error("La conversación debe estar en modo HUMAN"); e.status=409; throw e; }
+  const d=snap.data()||{}; if(effectiveMode(d)!=="HUMAN"){ const e=new Error("La conversación debe estar en modo HUMAN"); e.status=409; throw e; }
   return {ref,data:d,reads:1};
 }
 async function updateAfterSend(ref, text, mediaCount, status){
@@ -1249,7 +1249,21 @@ router.post("/conversations/:id/mode",authRequired,async(req,res)=>{
     const mode=String(req.body?.mode||"").toUpperCase()==="HUMAN" ? "HUMAN" : "BOT";
     const resolved=await resolveConversationGroup(id);
     const refs=(resolved.snaps||[]).map(s=>s.ref);
+
+    // v1.5.91: HUMAN/BOT manual es sticky por cliente + linea, no por alias fisico.
+    // El inbound de Gateway/Twilio siempre cae en el conversationId deterministico.
+    // Si el vendedor habia puesto HUMAN sobre un alias legacy y ese doc canonico aun
+    // no existia, el siguiente mensaje podia crear el canonico otra vez como BOT.
+    // Por eso el override manual se persiste SIEMPRE tambien en el doc canonico.
+    const customer=digits(resolved.customer||resolved.item?.customerPhone||"");
+    const line=digits(resolved.line||resolved.item?.canonicalLinePhone||resolved.item?.lineId||resolved.item?.inboundTo||"");
+    if(customer&&line){
+      const canonicalId=deterministicConversationId(customer,line);
+      const canonicalRef=inboxDb.collection("conversations").doc(canonicalId);
+      if(!refs.some(ref=>ref.path===canonicalRef.path)) refs.push(canonicalRef);
+    }
     if(!refs.length) refs.push(inboxDb.collection("conversations").doc(id));
+
     const patch={
       mode,
       manualModeOverride:mode,
@@ -1259,7 +1273,7 @@ router.post("/conversations/:id/mode",authRequired,async(req,res)=>{
     const batch=inboxDb.batch();
     refs.forEach(ref=>batch.set(ref,patch,{merge:true}));
     await batch.commit();
-    return res.json({ok:true,mode,writesEstimate:refs.length,relatedConversations:refs.length});
+    return res.json({ok:true,mode,writesEstimate:refs.length,relatedConversations:refs.length,stickyManual:true});
   }catch(e){ console.error("inbox mode",e); return res.status(500).json({ok:false,error:e.message}); }
 });
 

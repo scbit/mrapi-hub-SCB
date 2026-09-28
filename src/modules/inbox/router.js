@@ -605,6 +605,82 @@ async function materializeMedia(conversationId,messageId,index){
 
 
 
+async function enrichUnreadOwnersFromCrm(items=[]){
+  if(!items.length)return {items,reads:0};
+  let reads=0;
+  const dealToItems=new Map();
+  const hubToItems=new Map();
+
+  for(const item of items){
+    for(const dealId of uniqueStrings([item.dealId,...(item.dealIds||[])])){
+      if(!dealToItems.has(dealId))dealToItems.set(dealId,[]);
+      dealToItems.get(dealId).push(item);
+    }
+    for(const hubId of uniqueStrings([item.id,...(item.relatedConversationIds||[]),...(item.duplicateConversationIds||[])])){
+      if(!hubToItems.has(hubId))hubToItems.set(hubId,[]);
+      hubToItems.get(hubId).push(item);
+    }
+  }
+
+  // Fuente principal: el owner del trato en CRM. La conversación puede conservar
+  // ownerEmail viejo en algún alias legacy aunque el trato ya haya cambiado de owner.
+  for(const chunk of chunkValues([...dealToItems.keys()],30)){
+    if(!chunk.length)continue;
+    try{
+      const ds=await crmDb.collection("deals").where(admin.firestore.FieldPath.documentId(),"in",chunk).get();
+      reads+=ds.size;
+      for(const doc of ds.docs){
+        const d=doc.data()||{};
+        const owner=String(d.owner||"").trim().toLowerCase();
+        if(!owner)continue;
+        for(const item of dealToItems.get(doc.id)||[]) item.ownerEmail=owner;
+      }
+    }catch(e){console.warn("unread CRM owner by dealId",e.message||String(e));}
+  }
+
+  // Legacy: algunos chats no guardan dealId pero el deal sí conserva hubConversationId.
+  for(const chunk of chunkValues([...hubToItems.keys()],30)){
+    if(!chunk.length)continue;
+    try{
+      const ds=await crmDb.collection("deals").where("hubConversationId","in",chunk).limit(200).get();
+      reads+=ds.size;
+      for(const doc of ds.docs){
+        const d=doc.data()||{};
+        const owner=String(d.owner||"").trim().toLowerCase();
+        const hub=String(d.hubConversationId||"").trim();
+        if(!owner||!hub)continue;
+        for(const item of hubToItems.get(hub)||[]){
+          item.ownerEmail=owner;
+          item.dealIds=uniqueStrings([...(item.dealIds||[]),doc.id]);
+          item.dealId=item.dealIds[0]||item.dealId||"";
+        }
+      }
+    }catch(e){console.warn("unread CRM owner by hubConversationId",e.message||String(e));}
+  }
+
+  // Último fallback sólo para los que todavía no tienen vínculo CRM confiable:
+  // usamos el mismo índice por teléfono que ya usa el lateral CRM.
+  const unresolved=items.filter(item=>!String(item.dealId||"").trim() && !(item.dealIds||[]).length);
+  for(const batch of chunkValues(unresolved,10)){
+    const found=await Promise.all(batch.map(async item=>{
+      const phone=digits(item.waFrom||item.customerPhone||item.phone||item.from||item.contactPhone||"");
+      if(phone.length<7)return {item,doc:null,reads:0};
+      try{const r=await searchDealsIndexed(phone,1);return {item,doc:r.docs?.[0]||null,reads:Number(r.reads||0)};}
+      catch(e){console.warn("unread CRM owner phone fallback",phone,e.message||String(e));return {item,doc:null,reads:0};}
+    }));
+    for(const r of found){
+      reads+=r.reads;
+      if(!r.doc)continue;
+      const d=r.doc.data()||{};
+      const owner=String(d.owner||"").trim().toLowerCase();
+      if(owner)r.item.ownerEmail=owner;
+      r.item.dealIds=uniqueStrings([...(r.item.dealIds||[]),r.doc.id]);
+      r.item.dealId=r.item.dealIds[0]||r.item.dealId||"";
+    }
+  }
+  return {items,reads};
+}
+
 async function unreadConversationDocsByOwners({owners,limit,cursorDoc}){
   const base=inboxDb.collection("conversations");
   let reads=0;
@@ -647,7 +723,10 @@ async function unreadConversationDocsByOwners({owners,limit,cursorDoc}){
       }));
       for(const r of checks){reads+=r.reads;resolved.push(r.item);}
     }
-    items=mergeConversationSummaries(resolved)
+    items=mergeConversationSummaries(resolved);
+    const crmOwners=await enrichUnreadOwnersFromCrm(items);
+    reads+=crmOwners.reads;
+    items=crmOwners.items
       .filter(x=>(Number(x.unreadCount||0)>0 || x.hasUnread===true) && allowed.has(String(x.ownerEmail||"").trim().toLowerCase()));
   }
 

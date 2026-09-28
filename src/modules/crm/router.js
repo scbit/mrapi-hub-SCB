@@ -261,33 +261,88 @@ router.get("/deals",async(req,res)=>{
 router.get("/deals/:id",async(req,res)=>{try{const d=await crmDb.collection("deals").doc(req.params.id).get();if(!d.exists)return res.status(404).json({ok:false,error:"Trato no encontrado"});const data=d.data()||{};if(!(await canSeeOwner(req.authUser,data.owner)))return res.status(403).json({ok:false,error:"Sin permiso"});let c=null,reads=1;if(data.contactId){const x=await crmDb.collection("contacts").doc(data.contactId).get();reads++;if(x.exists)c={id:x.id,...x.data()};}res.json({ok:true,item:normalizeDoc(d),contact:c,readsEstimate:reads});}catch(e){res.status(500).json({ok:false,error:e.message});}});
 
 router.put("/deals/:id",async(req,res)=>{
-  try{const ref=crmDb.collection("deals").doc(req.params.id),d=await ref.get();if(!d.exists)return res.status(404).json({ok:false,error:"Trato no encontrado"});const old=d.data()||{};if(!(await canEditOwner(req.authUser,old.owner)))return res.status(403).json({ok:false,error:"Sin permiso"});
-    const allowed=["stage","dealType","leadQuality","owner","dueDate","value","notes","title"];const p={updatedAt:new Date()};for(const k of allowed)if(Object.prototype.hasOwnProperty.call(req.body||{},k))p[k]=req.body[k];
-    if(p.stage&&!PIPELINE_STAGES.includes(p.stage))return res.status(400).json({ok:false,error:"Etapa inválida"});if(p.dealType&&!DEAL_TYPES.includes(p.dealType))return res.status(400).json({ok:false,error:"Tipo inválido"});if(p.leadQuality&&!LEAD_QUALITY_VALUES.includes(p.leadQuality))return res.status(400).json({ok:false,error:"Calidad inválida"});if(Object.prototype.hasOwnProperty.call(p,"value"))p.value=Number(p.value||0);
-    if(p.owner&&!(await canSeeOwner(req.authUser,p.owner)))return res.status(403).json({ok:false,error:"No podés asignar ese owner"});
+  try{
+    const ref=crmDb.collection("deals").doc(req.params.id);
+    const d=await ref.get();
+    if(!d.exists)return res.status(404).json({ok:false,error:"Trato no encontrado"});
+    const old=d.data()||{};
+    if(!(await canEditOwner(req.authUser,old.owner)))return res.status(403).json({ok:false,error:"Sin permiso"});
+
+    // v1.5.93: actualizar únicamente los campos que el cliente realmente envió.
+    // Esto evita que un drawer/pestaña vieja pise una etapa o vencimiento recién
+    // modificado desde otra vista (CRM <-> Bandeja).
+    const allowed=["stage","dealType","leadQuality","owner","dueDate","value","notes","title"];
+    const p={updatedAt:new Date()};
+    for(const k of allowed){
+      if(Object.prototype.hasOwnProperty.call(req.body||{},k))p[k]=req.body[k];
+    }
+
+    if(Object.prototype.hasOwnProperty.call(p,"stage")){
+      p.stage=String(p.stage||"").trim();
+      if(!PIPELINE_STAGES.includes(p.stage))return res.status(400).json({ok:false,error:"Etapa inválida"});
+    }
+    if(Object.prototype.hasOwnProperty.call(p,"dealType")){
+      p.dealType=String(p.dealType||"").trim();
+      if(p.dealType&&!DEAL_TYPES.includes(p.dealType))return res.status(400).json({ok:false,error:"Tipo inválido"});
+    }
+    if(Object.prototype.hasOwnProperty.call(p,"leadQuality")){
+      p.leadQuality=String(p.leadQuality||"").trim();
+      if(p.leadQuality&&!LEAD_QUALITY_VALUES.includes(p.leadQuality))return res.status(400).json({ok:false,error:"Calidad inválida"});
+    }
+    if(Object.prototype.hasOwnProperty.call(p,"owner")){
+      p.owner=String(p.owner||"").trim().toLowerCase();
+      if(p.owner&&!(await canSeeOwner(req.authUser,p.owner)))return res.status(403).json({ok:false,error:"No podés asignar ese owner"});
+    }
+    if(Object.prototype.hasOwnProperty.call(p,"dueDate")){
+      p.dueDate=String(p.dueDate||"").trim().slice(0,10);
+      if(p.dueDate&&!/^\d{4}-\d{2}-\d{2}$/.test(p.dueDate))return res.status(400).json({ok:false,error:"Fecha de vencimiento inválida"});
+    }
+    if(Object.prototype.hasOwnProperty.call(p,"title")){
+      p.title=String(p.title||"").trim().slice(0,180);
+      if(!p.title)return res.status(400).json({ok:false,error:"El nombre del trato no puede quedar vacío"});
+      p.searchTerms=buildSearchTerms({...old,...p});
+    }
+    if(Object.prototype.hasOwnProperty.call(p,"notes"))p.notes=String(p.notes||"").slice(0,4000);
+    if(Object.prototype.hasOwnProperty.call(p,"value"))p.value=Number(p.value||0);
+
     const notesChanged=Object.prototype.hasOwnProperty.call(p,"notes")&&String(p.notes||"").trim()!==String(old.notes||"").trim();
-    if(Object.prototype.hasOwnProperty.call(p,"title"))p.searchTerms=buildSearchTerms({...old,...p});
     await ref.update(p);
     let writes=1,syncReads=0;
+
     const inboxChanges={};
     for(const k of ["stage","owner","dueDate","leadQuality","notes"]){
       if(Object.prototype.hasOwnProperty.call(p,k)&&String(p[k]??"")!==String(old[k]??""))inboxChanges[k]=p[k];
     }
-    if(Object.keys(inboxChanges).length){const sync=await syncDealToInbox(req.params.id,inboxChanges,{...old,...p});syncReads+=sync.reads;writes+=sync.writes;}
+    if(Object.keys(inboxChanges).length){
+      const sync=await syncDealToInbox(req.params.id,inboxChanges,{...old,...p});
+      syncReads+=sync.reads;writes+=sync.writes;
+    }
+
     let whatsappAlert={ok:true,skipped:true,reason:"not_entering_cotizado_para_enviar"};
     if(Object.prototype.hasOwnProperty.call(p,"stage")&&p.stage===TARGET_STAGE&&String(old.stage||"").trim()!==TARGET_STAGE){
       // El cambio del trato ya quedó guardado. Una falla de WhatsApp nunca revierte el CRM.
       whatsappAlert=await sendCotizadoAlert(req.params.id,{...old,...p});
     }
+
     if(notesChanged){
       await ref.collection("notes").add({note:String(p.notes||"").trim(),previousNote:String(old.notes||"").trim(),action:String(p.notes||"").trim()?"updated":"cleared",user:String(req.authUser.email||req.authUser.name||"crm"),createdAt:admin.firestore.FieldValue.serverTimestamp()});
       writes++;
     }
     if(Object.prototype.hasOwnProperty.call(p,"stage")&&String(p.stage||"")!==String(old.stage||"")){const a=await writeDealAudit(req.params.id,{action:"stage_changed",field:"stage",from:String(old.stage||""),to:String(p.stage||"")},req.authUser,"crm");writes+=Number(a.writes||0);}
+    if(Object.prototype.hasOwnProperty.call(p,"dueDate")&&String(p.dueDate||"")!==String(old.dueDate||"")){const a=await writeDealAudit(req.params.id,{action:"due_date_changed",field:"dueDate",from:String(old.dueDate||""),to:String(p.dueDate||"")},req.authUser,"crm");writes+=Number(a.writes||0);}
+    if(Object.prototype.hasOwnProperty.call(p,"title")&&String(p.title||"")!==String(old.title||"")){const a=await writeDealAudit(req.params.id,{action:"title_changed",field:"title",from:String(old.title||""),to:String(p.title||"")},req.authUser,"crm");writes+=Number(a.writes||0);}
     if(Object.prototype.hasOwnProperty.call(p,"owner")&&String(p.owner||"").toLowerCase()!==String(old.owner||"").toLowerCase()){const a=await writeDealAudit(req.params.id,{action:"owner_changed",field:"owner",from:String(old.owner||""),to:String(p.owner||"")},req.authUser,"crm");writes+=Number(a.writes||0);}
     if(notesChanged){const a=await writeDealAudit(req.params.id,{action:String(p.notes||"").trim()?"note_updated":"note_cleared",field:"notes",detail:String(p.notes||"").trim()?"Nota del CRM modificada":"Nota del CRM eliminada"},req.authUser,"crm");writes+=Number(a.writes||0);}
-    return res.json({ok:true,readsEstimate:1+syncReads,writesEstimate:writes,whatsappAlert});
-  }catch(e){res.status(500).json({ok:false,error:e.message});}
+
+    // Leer de vuelta la fuente de verdad. El frontend usa esta respuesta y deja de
+    // asumir que Firestore guardó lo que mostró optimísticamente en pantalla.
+    const saved=await ref.get();
+    const item=saved.exists?publicDeal(saved,null):null;
+    return res.json({ok:true,item,readsEstimate:2+syncReads,writesEstimate:writes,whatsappAlert});
+  }catch(e){
+    console.error("crm deal update",req.params.id,e);
+    res.status(500).json({ok:false,error:e.message});
+  }
 });
 
 router.get("/deals/:id/note-history",async(req,res)=>{

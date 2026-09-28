@@ -607,57 +607,53 @@ async function materializeMedia(conversationId,messageId,index){
 
 async function unreadConversationDocsByOwners({owners,limit,cursorDoc}){
   const base=inboxDb.collection("conversations");
-  const wanted=Math.max(10,limit||50);
-  let cursor=cursorDoc||null;
   let reads=0;
-  let matched=[];
-  let hasMore=true;
-  let safety=0;
-  let lastScanned=cursorDoc||null;
+  const unreadDocs=[];
+  let lastDoc=null;
 
-  // Query only unread documents. This avoids scanning thousands of ordinary
-  // conversations when unread chats are sparse.
-  while(matched.length<wanted && hasMore && safety<20){
-    safety++;
-    const fetchSize=Math.min(200,Math.max(50,(wanted-matched.length)*2));
-    let q=base.where("hasUnread","==",true);
-    let usedOwnerQuery=false;
-    try{
-      if(owners.length===1){q=q.where("ownerEmail","==",owners[0]);usedOwnerQuery=true;}
-      else if(owners.length>1 && owners.length<=30){q=q.where("ownerEmail","in",owners);usedOwnerQuery=true;}
-      if(cursor)q=q.startAfter(cursor);
-      q=q.limit(fetchSize);
-      const snap=await q.get();
-      reads+=snap.size;
-      if(!snap.docs.length){hasMore=false;break;}
-      lastScanned=snap.docs[snap.docs.length-1];
-      cursor=lastScanned;
-      let docs=snap.docs;
-      if(!usedOwnerQuery && owners.length){
-        const allowed=new Set(owners.map(x=>String(x||"").toLowerCase()));
-        docs=docs.filter(d=>allowed.has(String((d.data()||{}).ownerEmail||"").toLowerCase()));
-      }
-      matched=mergeConversationSummaries([...matched,...docs.map(summary)]).filter(x=>Number(x.unreadCount||0)>0 || x.hasUnread===true);
-      hasMore=snap.size===fetchSize;
-    }catch(e){
-      // Some Firestore projects may not have an index for ownerEmail + hasUnread.
-      // Fallback still reads ONLY unread docs and filters owners in memory.
-      let fq=base.where("hasUnread","==",true);
-      if(cursor)fq=fq.startAfter(cursor);
-      fq=fq.limit(fetchSize);
-      const snap=await fq.get();
-      reads+=snap.size;
-      if(!snap.docs.length){hasMore=false;break;}
-      lastScanned=snap.docs[snap.docs.length-1];
-      cursor=lastScanned;
-      const allowed=owners.length?new Set(owners.map(x=>String(x||"").toLowerCase())):null;
-      const docs=allowed?snap.docs.filter(d=>allowed.has(String((d.data()||{}).ownerEmail||"").toLowerCase())):snap.docs;
-      matched=mergeConversationSummaries([...matched,...docs.map(summary)]).filter(x=>Number(x.unreadCount||0)>0 || x.hasUnread===true);
-      hasMore=snap.size===fetchSize;
-    }
+  // v1.5.92: "No leídos" debe ser una foto completa y consistente.
+  // Leemos TODOS los documentos físicos con hasUnread=true sin filtrar owner todavía.
+  // El owner puede vivir en otro alias legacy del mismo cliente+línea; si filtramos owner
+  // en Firestore antes de agrupar, se pierden chats (ej.: 15 de Florencia en Todos los
+  // no leídos, pero sólo 10 en No leídos + Florencia).
+  while(true){
+    let q=base.where("hasUnread","==",true).limit(500);
+    if(lastDoc) q=q.startAfter(lastDoc);
+    const snap=await q.get();
+    reads+=snap.size;
+    if(!snap.docs.length) break;
+    unreadDocs.push(...snap.docs);
+    lastDoc=snap.docs[snap.docs.length-1];
+    if(snap.size<500) break;
   }
-  matched.sort((a,b)=>new Date(b.lastMessageAt||0)-new Date(a.lastMessageAt||0));
-  return {items:matched.slice(0,wanted),reads,hasMore,nextCursor:lastScanned?.id||null};
+
+  let items=mergeConversationSummaries(unreadDocs.map(summary))
+    .filter(x=>Number(x.unreadCount||0)>0 || x.hasUnread===true);
+
+  // Con filtro de owner, resolvemos el grupo completo de aliases ANTES de decidir.
+  // Así usamos el mismo owner efectivo que ve la Bandeja al abrir el chat.
+  if(owners.length && items.length){
+    const allowed=new Set(owners.map(x=>String(x||"").trim().toLowerCase()).filter(Boolean));
+    const resolved=[];
+    for(const batch of chunkValues(items,8)){
+      const checks=await Promise.all(batch.map(async item=>{
+        try{
+          const group=await resolveConversationGroup(item.id);
+          return {item:group.item||item,reads:Number(group.reads||0)};
+        }catch(e){
+          console.warn("unread owner group resolve",item.id,e.message||String(e));
+          return {item,reads:0};
+        }
+      }));
+      for(const r of checks){reads+=r.reads;resolved.push(r.item);}
+    }
+    items=mergeConversationSummaries(resolved)
+      .filter(x=>(Number(x.unreadCount||0)>0 || x.hasUnread===true) && allowed.has(String(x.ownerEmail||"").trim().toLowerCase()));
+  }
+
+  items.sort((a,b)=>new Date(b.lastMessageAt||0)-new Date(a.lastMessageAt||0));
+  // No leídos carga todo de una vez: sin paginación ni botón "Cargar más".
+  return {items,reads,hasMore:false,nextCursor:null};
 }
 
 async function enrichConversationLinksFromCrm(items=[]){

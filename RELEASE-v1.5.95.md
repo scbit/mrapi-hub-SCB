@@ -1,4 +1,4 @@
-# v1.5.95
+# v1.5.96
 
 - Corrige **No leídos + owner**: el filtro toma como fuente de verdad el owner actual del trato en CRM, no un `ownerEmail` legacy/stale de la conversación.
 - Antes de aplicar owner, mantiene la resolución de aliases cliente+línea.

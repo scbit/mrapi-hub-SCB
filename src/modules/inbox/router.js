@@ -912,11 +912,40 @@ router.get("/conversations/search",authRequired,async(req,res)=>{
     const addSnap=snap=>{reads+=snap.size;for(const d of snap.docs)docs.set(d.id,d)};
     const safe=async fn=>{try{addSnap(await fn())}catch(e){console.warn("inbox search query",e.message||String(e))}};
 
-    // Teléfono: soporta formatos legacy (whatsapp:+54..., +54..., 54...) y campos históricos.
+    // Teléfono: primero intenta coincidencia directa en Inbox. Además usa el índice CRM
+    // porque muchos usuarios buscan el número local/sufijo (ej. 1130962554) mientras
+    // Firestore guarda 5491130962554 / whatsapp:+5491130962554. Las queries "in"
+    // son exactas y por sí solas nunca pueden resolver ese caso.
     if(phone.length>=6){
       const variants=uniqueStrings([phone,`+${phone}`,`whatsapp:+${phone}`,`whatsapp:${phone}`]).slice(0,10);
       for(const field of ["waFrom","customerPhone","phone","from","contactPhone"])
         await safe(()=>inboxDb.collection("conversations").where(field,"in",variants).limit(50).get());
+
+      if(phone.length>=7){
+        const foundDeals=await searchDealsIndexed(phone,30);reads+=Number(foundDeals.reads||0);
+        const contactIds=uniqueStrings(foundDeals.docs.map(d=>(d.data()||{}).contactId).filter(Boolean));
+        const hubConversationIds=uniqueStrings(foundDeals.docs.map(d=>(d.data()||{}).hubConversationId).filter(Boolean));
+        const fullPhones=uniqueStrings(foundDeals.docs.flatMap(d=>{
+          const x=d.data()||{}; const p=digits(x.contactPhone||x.phone||"");
+          return p?[p,`+${p}`,`whatsapp:+${p}`,`whatsapp:${p}`]:[];
+        }));
+
+        for(let i=0;i<contactIds.length;i+=10){
+          const chunk=contactIds.slice(i,i+10);
+          if(chunk.length) await safe(()=>inboxDb.collection("conversations").where("contactId","in",chunk).limit(50).get());
+        }
+        for(const id of hubConversationIds.slice(0,30)){
+          try{
+            const snap=await inboxDb.collection("conversations").doc(id).get();
+            reads+=1;if(snap.exists)docs.set(snap.id,snap);
+          }catch(e){console.warn("inbox search hubConversationId",e.message||String(e));}
+        }
+        for(let i=0;i<fullPhones.length;i+=10){
+          const chunk=fullPhones.slice(i,i+10);
+          for(const field of ["waFrom","customerPhone","phone","from","contactPhone"])
+            await safe(()=>inboxDb.collection("conversations").where(field,"in",chunk).limit(50).get());
+        }
+      }
     }else{
       // Nombre: usar el índice global de Contactos del CRM y luego traer sólo sus chats.
       const found=await searchContactsIndexed(raw,30);reads+=found.reads;

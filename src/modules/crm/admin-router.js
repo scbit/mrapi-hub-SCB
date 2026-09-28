@@ -61,11 +61,11 @@ const MY_STATUS_CACHE_TTL_MS=60000;
 const myStatusOwnerCache=new Map();
 function tsMillis(v){if(!v)return 0;if(typeof v.toMillis==="function")return Number(v.toMillis()||0);if(v instanceof Date)return Number(v.getTime()||0);if(typeof v._seconds==="number")return Number(v._seconds*1000);if(typeof v.seconds==="number")return Number(v.seconds*1000);const d=new Date(v);return Number.isNaN(d.getTime())?0:d.getTime();}
 function qualityKey(v){const q=String(v||"NO_RESPONDE").trim().toUpperCase();return LEAD_QUALITY_VALUES.includes(q)?q:"NO_RESPONDE";}
-async function exactMyStatusFallback(owner,range,today){
+async function exactMyStatusFallback(owner,range,today,forceFresh=false){
   const now=Date.now(),cacheKey=owner;
   let cached=myStatusOwnerCache.get(cacheKey);
   let rows;
-  if(cached&&cached.expiresAt>now){rows=cached.rows;}else{
+  if(!forceFresh&&cached&&cached.expiresAt>now){rows=cached.rows;}else{
     const snap=await crmDb.collection("deals").where("owner","==",owner).limit(5000).get();
     rows=snap.docs.map(d=>({id:d.id,...(d.data()||{})}));
     myStatusOwnerCache.set(cacheKey,{expiresAt:now+MY_STATUS_CACHE_TTL_MS,rows});
@@ -84,7 +84,7 @@ async function exactMyStatusFallback(owner,range,today){
   return {metrics:m,readsEstimate:cached&&cached.expiresAt>now?0:rows.length,cached:!!(cached&&cached.expiresAt>now),scanned:rows.length};
 }
 router.get("/my-status",async(req,res)=>{try{
-  const range=periodRange(req.query.period,req.query.start,req.query.end),today=todayBA();
+  const range=periodRange(req.query.period,req.query.start,req.query.end),today=todayBA();const forceFresh=String(req.query.fresh||"")==="1";
   if(isTotalOwner(req.query.owner)){const scope=await totalOwnerScope(req),exact=await exactTotalMetrics(scope,range,today);return res.json({ok:true,metrics:exact.metrics,period:range,readsEstimate:exact.readsEstimate,degraded:false,total:true,fallback:exact.fallback,note:exact.fallback?"TOTAL exacto por fallback paginado: se evitó el corte de 10.000 tratos.":"TOTAL exacto con COUNT: sin límite de 10.000 tratos."});}
   const owner=await allowedOwner(req,req.query.owner);
   let readsEstimate=0;const metricErrors=[];
@@ -100,7 +100,7 @@ router.get("/my-status",async(req,res)=>{try{
   // Para Nuevos Prospectos vencidos y para cualquier índice faltante, usamos UN fallback exacto sobre el owner.
   // Esto replica 1:1 la semántica del CRM legacy y evita mostrar ceros falsos.
   if(metricErrors.length || (range.startDate&&range.endDate)){
-    const exact=await exactMyStatusFallback(owner,range,today);
+    const exact=await exactMyStatusFallback(owner,range,today,forceFresh);
     return res.json({ok:true,metrics:exact.metrics,period:range,readsEstimate:readsEstimate+exact.readsEstimate,degraded:false,fallback:true,fallbackCached:exact.cached,scanned:exact.scanned,note:exact.cached?"Mi Estado exacto · fallback cacheado (0 reads adicionales en esta instancia).":"Mi Estado exacto · fallback temporal por falta de índices. Se hizo una sola lectura del owner y se cachea 60 s."});
   }
   metrics.nuevosProspectosVencidos=await safeCount(base.where("dueDate","<",today),"newProspectsOverdue",metricErrors);readsEstimate++;
@@ -114,7 +114,7 @@ router.get("/my-status/deals",async(req,res)=>{try{
   const offset=Math.max(0,Math.min(500,Number(req.query.offset||0)||0));
   const overdue=String(req.query.overdue||"")==="1";
   const mode=String(req.query.mode||"").trim().toLowerCase();
-  const range=periodRange(req.query.period,req.query.start,req.query.end),today=todayBA();
+  const range=periodRange(req.query.period,req.query.start,req.query.end),today=todayBA();const forceFresh=String(req.query.fresh||"")==="1";
   const cached=myStatusOwnerCache.get(owner);
   function filterRows(rows){
     let out=(Array.isArray(rows)?rows:[]).slice();
@@ -134,7 +134,7 @@ router.get("/my-status/deals",async(req,res)=>{try{
   function fromRows(rows,readsEstimate,source,note){const filtered=filterRows(rows),items=filtered.slice(offset,offset+limit).map(publicRow);return res.json({ok:true,items,total:filtered.length,offset,nextOffset:offset+items.length,hasMore:offset+items.length<filtered.length,readsEstimate,source,note:note||""});}
   if(totalMode){const scope=await totalOwnerScope(req),loaded=await loadDealsForScope(scope);return fromRows(loaded.rows,loaded.reads,"total-scope","TOTAL: detalle de todos los owners visibles.");}
   // Si Mi Estado ya hizo el fallback exacto, reutilizamos esa foto del owner: 0 reads.
-  if(cached&&cached.expiresAt>Date.now())return fromRows(cached.rows,0,"owner-cache","Detalle servido desde cache; 0 reads adicionales.");
+  if(!forceFresh&&cached&&cached.expiresAt>Date.now())return fromRows(cached.rows,0,"owner-cache","Detalle servido desde cache; 0 reads adicionales.");
   try{
     let q=crmDb.collection("deals").where("owner","==",owner);
     if(mode==="new"){
@@ -155,7 +155,7 @@ router.get("/my-status/deals",async(req,res)=>{try{
     return res.json({ok:true,items:page,total:null,offset,nextOffset:offset+page.length,hasMore:docs.length>offset+limit,readsEstimate:snap.size,source:"indexed-query"});
   }catch(indexError){
     if(!/index/i.test(String(indexError&&indexError.message||"")))throw indexError;
-    const exact=await exactMyStatusFallback(owner,range,today);
+    const exact=await exactMyStatusFallback(owner,range,today,forceFresh);
     const cacheNow=myStatusOwnerCache.get(owner);
     return fromRows(cacheNow?.rows||[],exact.readsEstimate,exact.cached?"owner-cache":"owner-fallback",exact.cached?"Detalle servido desde cache; 0 reads adicionales.":"Detalle servido desde un único fallback exacto del owner y cacheado 60 s.");
   }

@@ -1314,17 +1314,46 @@ router.get("/conversations/:id/messages",authRequired,async(req,res)=>{
   try{
     const id=cleanString(decodeURIComponent(req.params.id||""),220);
     if(!id) return res.status(400).json({ok:false,error:"Conversación inválida"});
-    const requested=Math.max(20,Math.min(Number(req.query.limit||60),100));
-    const related=uniqueStrings([id,...String(req.query.related||"").split(",")]).slice(0,10);
-    let reads=0;const all=[];
+
+    // v1.5.98: el historial no puede depender del límite visual de la lista ni de
+    // los aliases que casualmente tenga cargados el frontend. Resolver siempre el
+    // grupo completo cliente + línea en servidor y leer todos sus mensajes.
+    const resolved=await resolveConversationGroup(id);
+    if(!resolved.item) return res.status(404).json({ok:false,error:"Conversación no encontrada"});
+
+    const related=uniqueStrings([
+      id,
+      ...(resolved.snaps||[]).map(s=>s.id),
+      ...(resolved.item.relatedConversationIds||[]),
+      ...(resolved.item.duplicateConversationIds||[]),
+      ...String(req.query.related||"").split(",")
+    ]).slice(0,50);
+
+    let reads=Number(resolved.reads||0);const all=[];
+    const pageSize=250;
     for(const conversationId of related){
-      const snap=await inboxDb.collection("conversations").doc(conversationId).collection("messages").orderBy("timestamp","desc").limit(requested).get();
-      reads+=snap.size;for(const d of snap.docs)all.push(message(d,conversationId));
+      let lastDoc=null;
+      while(true){
+        let q=inboxDb.collection("conversations").doc(conversationId).collection("messages")
+          .orderBy("timestamp","desc").limit(pageSize);
+        if(lastDoc) q=q.startAfter(lastDoc);
+        const snap=await q.get();
+        reads+=snap.size;
+        for(const d of snap.docs) all.push(message(d,conversationId));
+        if(snap.size<pageSize) break;
+        lastDoc=snap.docs[snap.docs.length-1];
+        if(!lastDoc) break;
+      }
     }
+
     const by=new Map();
-    for(const m of all){const key=m.messageSid||`${m.conversationId}:${m.id}`;const prev=by.get(key);if(!prev||String(prev.timestamp||"")<=String(m.timestamp||""))by.set(key,m);}
-    const items=[...by.values()].sort((a,b)=>String(a.timestamp||"").localeCompare(String(b.timestamp||""))).slice(-requested);
-    return res.json({ok:true,items,readsEstimate:reads,relatedConversations:related.length});
+    for(const m of all){
+      const key=m.messageSid||`${m.conversationId}:${m.id}`;
+      const prev=by.get(key);
+      if(!prev||String(prev.timestamp||"")<=String(m.timestamp||"")) by.set(key,m);
+    }
+    const items=[...by.values()].sort((a,b)=>String(a.timestamp||"").localeCompare(String(b.timestamp||"")));
+    return res.json({ok:true,items,readsEstimate:reads,relatedConversations:related.length,historyComplete:true});
   }catch(e){ console.error("inbox messages",e); return res.status(500).json({ok:false,error:e.message}); }
 });
 

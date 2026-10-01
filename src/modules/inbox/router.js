@@ -15,7 +15,7 @@ const dialogflow = require("./dialogflow");
 const { authRequired } = require("../../middleware/auth");
 const router = express.Router();
 const FieldValue = admin.firestore.FieldValue;
-const { PIPELINE_STAGES } = require("../crm/constants");
+const { PIPELINE_STAGES, INBOX_DEFAULT_STAGE } = require("../crm/constants");
 const {TARGET_STAGE,sendCotizadoAlert}=require("../crm/cotizado-alert");
 const { visibleOwners, canSeeOwner, isAdminLike } = require("../crm/access");
 const { searchContactsIndexed, searchDealsIndexed } = require("../crm/search-index");
@@ -1152,7 +1152,7 @@ router.post("/conversations/:id/deal",authRequired,async(req,res)=>{
     if(!snap.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"}); const c=snap.data()||{};
     const owner=await chooseOwner(req.authUser,req.body?.owner,c.ownerEmail); const now=FieldValue.serverTimestamp(); let contactId=cleanString(c.contactId,220); let contactRef=null; let writes=0;
     if(!contactId){contactRef=crmDb.collection("contacts").doc();contactId=contactRef.id;}
-    const dealRef=crmDb.collection("deals").doc(); const stage=PIPELINE_STAGES.includes(req.body?.stage)?req.body.stage:"Nuevos Prospectos";
+    const dealRef=crmDb.collection("deals").doc(); const stage=PIPELINE_STAGES.includes(req.body?.stage)?req.body.stage:INBOX_DEFAULT_STAGE;
     const dealData={title:cleanString(req.body?.title||c.contactName||c.companyName||c.waFrom||"Nuevo trato",180),contactId,owner,stage,dealType:"",leadQuality:"",value:0,notes:"",hubConversationId:id,createdBy:String(req.authUser?.email||req.authUser?.name||""),createdAt:now,updatedAt:now};
     if(contactRef){const contactData={name:cleanString(req.body?.name||c.contactName||c.profileName||c.waFrom,180),phone:cleanString(c.waFrom,80),company:cleanString(c.companyName,180),email:"",owner,source:"MRAPI_HUB",hubConversationId:id,createdBy:String(req.authUser?.email||req.authUser?.name||""),createdAt:now,updatedAt:now};await contactRef.set(contactData);writes++;const ca=await writeContactAudit(contactId,{action:"contact_created",detail:`Contacto creado desde Bandeja: ${contactData.name}`},req.authUser,"inbox");writes+=Number(ca.writes||0);}
     await dealRef.set(dealData);writes++;

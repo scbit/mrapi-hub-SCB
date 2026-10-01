@@ -2,7 +2,8 @@
 const config = require("./config");
 const scb = require("../tenants/scb");
 const artec = require("../tenants/artec");
-const presets={scb,artec};
+const fiorella = require("../tenants/fiorella");
+const presets={scb,artec,fiorella};
 function getTenant(){
   const preset=presets[config.tenantId] || {
     id:config.tenantId || "tenant",
@@ -11,6 +12,7 @@ function getTenant(){
     subtitle:"",
     modules:{hub:true,crm:true,inbox:true},
     branding:{shortName:config.brandShortName || String(config.tenantId||"MRAPI").toUpperCase(),logoAsset:"",primary:"#4b5563",primaryDark:"#1f2937",accent:"#9ca3af",ink:"#20242b",muted:"#7d8797",line:"#e5e7eb",background:"#f7f7f8",soft:"#f1f3f5"},
+    pipeline:{stages:[],inboxDefaultStage:"",crmDefaultStage:"",importantStages:[],wonStages:[],lostStages:[]},
     features:{legacyUserCompatibility:true,readOptimizedInbox:true}
   };
   const b=preset.branding||{};

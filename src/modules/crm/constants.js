@@ -1,7 +1,16 @@
 "use strict";
-const PIPELINE_STAGES=["Nuevos Prospectos","No responde","Seguimiento","Marca personal","Esperando PI","Para cotizar","Cotizado para enviar","Horno","Pendiente de pago","Ganado courier","Ganado maritimo","Perdido","Descartado","Buscar Producto","Busqueda en Proceso","REVISAR ZOHO","SEGUIMIENTO ZOHO","Base Importadores","RECUPERO ZOHO","RECOVERY +15 DIAS","RESPONDIO RECOVERY"];
+const {getTenant}=require("../../core/tenant");
+const SCB_PIPELINE_STAGES=["Nuevos Prospectos", "No responde", "Seguimiento", "Marca personal", "Esperando PI", "Para cotizar", "Cotizado para enviar", "Horno", "Pendiente de pago", "Ganado courier", "Ganado maritimo", "Perdido", "Descartado", "Buscar Producto", "Busqueda en Proceso", "REVISAR ZOHO", "SEGUIMIENTO ZOHO", "Base Importadores", "RECUPERO ZOHO", "RECOVERY +15 DIAS", "RESPONDIO RECOVERY"];
+const tenant=getTenant();
+const configured=Array.isArray(tenant.pipeline?.stages)?tenant.pipeline.stages.filter(Boolean):[];
+const PIPELINE_STAGES=configured.length?configured:SCB_PIPELINE_STAGES;
+const INBOX_DEFAULT_STAGE=PIPELINE_STAGES.includes(tenant.pipeline?.inboxDefaultStage)?tenant.pipeline.inboxDefaultStage:(PIPELINE_STAGES.includes("Nuevos Prospectos")?"Nuevos Prospectos":PIPELINE_STAGES[0]);
+const CRM_DEFAULT_STAGE=PIPELINE_STAGES.includes(tenant.pipeline?.crmDefaultStage)?tenant.pipeline.crmDefaultStage:(PIPELINE_STAGES.includes("No responde")?"No responde":INBOX_DEFAULT_STAGE);
+const IMPORTANT_STAGES=(Array.isArray(tenant.pipeline?.importantStages)?tenant.pipeline.importantStages:[]).filter(x=>PIPELINE_STAGES.includes(x));
+const WON_STAGES=(Array.isArray(tenant.pipeline?.wonStages)?tenant.pipeline.wonStages:[]).filter(x=>PIPELINE_STAGES.includes(x));
+const LOST_STAGES=(Array.isArray(tenant.pipeline?.lostStages)?tenant.pipeline.lostStages:[]).filter(x=>PIPELINE_STAGES.includes(x));
 const DEAL_TYPES=["LCL_PROPIO","LCL_CONVENCIONAL","FCL","AEREO_COURIER","AEREO_CARGA"];
 const DEAL_TYPE_LABELS={LCL_PROPIO:"LCL Propio",LCL_CONVENCIONAL:"LCL Convencional",FCL:"FCL",AEREO_COURIER:"Aéreo Courier",AEREO_CARGA:"Aéreo Carga"};
 const LEAD_QUALITY_VALUES=["DESCARTADO","NO_RESPONDE","REGULAR","BUENO","EXCELENTE"];
 const LEAD_QUALITY_LABELS={DESCARTADO:"Descartado",NO_RESPONDE:"No Responde",REGULAR:"Regular",BUENO:"Bueno",EXCELENTE:"Excelente"};
-module.exports={PIPELINE_STAGES,DEAL_TYPES,DEAL_TYPE_LABELS,LEAD_QUALITY_VALUES,LEAD_QUALITY_LABELS};
+module.exports={PIPELINE_STAGES,INBOX_DEFAULT_STAGE,CRM_DEFAULT_STAGE,IMPORTANT_STAGES,WON_STAGES,LOST_STAGES,DEAL_TYPES,DEAL_TYPE_LABELS,LEAD_QUALITY_VALUES,LEAD_QUALITY_LABELS};

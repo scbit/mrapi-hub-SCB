@@ -161,3 +161,46 @@ button,a,select,input,textarea{touch-action:manipulation}
   /* Bandeja remains an app-like fixed viewport and scrolls only inside its own panes. */
   .shell{height:100dvh!important;overflow:hidden!important}
 }
+
+
+/* v1.5.99 — mobile: HUMAN / BOT siempre visibles en cabecera del chat */
+@media(max-width:850px){
+  .shell.chatOpen .chatHead{
+    height:auto!important;
+    min-height:104px!important;
+    display:flex!important;
+    flex-direction:column!important;
+    align-items:stretch!important;
+    gap:8px!important;
+    padding:8px 10px!important;
+  }
+  .shell.chatOpen .chatIdentity{
+    width:100%!important;
+    min-width:0!important;
+  }
+  .shell.chatOpen .chatActions{
+    width:100%!important;
+    max-width:none!important;
+    display:flex!important;
+    align-items:center!important;
+    gap:6px!important;
+    overflow-x:visible!important;
+    flex-wrap:wrap!important;
+    padding:0!important;
+  }
+  .shell.chatOpen .modeButtons{
+    display:flex!important;
+    visibility:visible!important;
+    gap:5px!important;
+    flex:0 0 auto!important;
+  }
+  .shell.chatOpen .modeButtons .btn{
+    display:inline-flex!important;
+    min-height:34px!important;
+    align-items:center!important;
+    justify-content:center!important;
+    padding:6px 9px!important;
+    font-size:10px!important;
+    white-space:nowrap!important;
+  }
+}

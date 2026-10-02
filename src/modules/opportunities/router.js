@@ -42,11 +42,21 @@ async function hydrateOpportunity(doc,req){
     .filter(d=>String(d.notes||"").trim())
     .map(d=>({dealId:d.id,title:d.title||d.contactName||"Trato",note:String(d.notes||""),stage:d.stage||"",updatedAt:d.updatedAt||d.createdAt||null}))
     .sort((a,b)=>String(b.updatedAt||"").localeCompare(String(a.updatedAt||"")));
+  let opportunityNotes=[];
+  try{
+    const ns=await doc.ref.collection("notes").orderBy("createdAt","desc").limit(50).get();reads+=ns.size;
+    opportunityNotes=ns.docs.map(n=>{const x=n.data()||{};return{id:n.id,note:String(x.note||""),userEmail:String(x.userEmail||""),userName:String(x.userName||""),userLabel:String(x.userLabel||x.userName||x.userEmail||"Usuario"),createdAt:ts(x.createdAt)};});
+  }catch(e){console.warn("opportunity notes",doc.id,e.message||String(e));}
+  // Backward compatibility: v1.6.2 stored one mutable note on the opportunity itself.
+  if(!opportunityNotes.length&&String(o.notes||"").trim()){
+    opportunityNotes.push({id:"legacy",note:String(o.notes),userEmail:String(o.createdBy||""),userName:"",userLabel:String(o.createdBy||"Registro anterior"),createdAt:o.updatedAt||o.createdAt||null,legacy:true});
+  }
   const summary={
     dealsCount:deals.length,
     totalValue:deals.reduce((a,d)=>a+Number(d.value||0),0),
     nearestDueDate:deals.map(d=>dueDateIso(d.dueDate)).filter(Boolean).sort()[0]||"",
-    notes:notes.slice(0,12)
+    notes:notes.slice(0,12),
+    opportunityNotes
   };
   return {item:{...o,dealIds:deals.map(d=>d.id),contactId:contact?.id||o.contactId||""},contact,deals,summary,reads};
 }
@@ -140,11 +150,16 @@ router.post("/",async(req,res)=>{
       contactName,
       dealIds:links.deals.map(d=>d.id),
       owner,
-      notes:String(req.body?.notes||"").slice(0,6000),
       createdAt:now,updatedAt:now,
       createdBy:String(req.authUser?.email||req.authUser?.id||"")
     });
-    return res.json({ok:true,id:ref.id,writesEstimate:1});
+    let writes=1;
+    const newNote=String(req.body?.newNote||req.body?.notes||"").trim().slice(0,6000);
+    if(newNote){
+      await ref.collection("notes").add({note:newNote,userEmail:String(req.authUser?.email||""),userName:String(req.authUser?.name||""),userLabel:String(req.authUser?.name||req.authUser?.email||req.authUser?.id||"Usuario"),createdAt:admin.firestore.FieldValue.serverTimestamp()});
+      writes++;
+    }
+    return res.json({ok:true,id:ref.id,writesEstimate:writes});
   }catch(e){return res.status(e.status||500).json({ok:false,error:e.message});}
 });
 
@@ -159,12 +174,17 @@ router.put("/:id",async(req,res)=>{
     const links=await validateLinks(req,nextContact,Array.isArray(nextDeals)?nextDeals:[]);
     const p={updatedAt:admin.firestore.FieldValue.serverTimestamp()};
     if(Object.prototype.hasOwnProperty.call(req.body||{},"title")){p.title=clean(req.body.title,180);if(!p.title)return res.status(400).json({ok:false,error:"El nombre no puede quedar vacío"});}
-    if(Object.prototype.hasOwnProperty.call(req.body||{},"notes"))p.notes=String(req.body.notes||"").slice(0,6000);
     if(Object.prototype.hasOwnProperty.call(req.body||{},"owner")){p.owner=clean(req.body.owner,220).toLowerCase();if(p.owner&&!(await canSeeOwner(req.authUser,p.owner)))return res.status(403).json({ok:false,error:"No podés asignar ese owner"});}
     p.contactId=links.contactId||"";
     p.dealIds=links.deals.map(d=>d.id);
     await ref.update(p);
-    return res.json({ok:true,writesEstimate:1});
+    let writes=1;
+    const newNote=String(req.body?.newNote||"").trim().slice(0,6000);
+    if(newNote){
+      await ref.collection("notes").add({note:newNote,userEmail:String(req.authUser?.email||""),userName:String(req.authUser?.name||""),userLabel:String(req.authUser?.name||req.authUser?.email||req.authUser?.id||"Usuario"),createdAt:admin.firestore.FieldValue.serverTimestamp()});
+      writes++;
+    }
+    return res.json({ok:true,writesEstimate:writes});
   }catch(e){return res.status(e.status||500).json({ok:false,error:e.message});}
 });
 

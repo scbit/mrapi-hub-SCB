@@ -402,7 +402,23 @@ router.get("/deals/:id/hub-link",async(req,res)=>{
     let contact=null;
     if(deal.contactId){const c=await crmDb.collection("contacts").doc(String(deal.contactId)).get();reads++;if(c.exists)contact={id:c.id,...(c.data()||{})}}
     if(deal.contactId)await safeQuery(()=>inboxDb.collection("conversations").where("contactId","==",String(deal.contactId)).limit(30).get());
-    const phone=String(contact?.phone||deal.contactPhone||deal.phone||"").replace(/\D/g,"");
+    let phone=String(contact?.phone||deal.contactPhone||deal.phone||"").replace(/\D/g,"");
+    // v1.6.3: Mi Estado/legacy deals can have no materialized contact document even though
+    // the CRM search index knows the phone. Reuse the same indexed truth that Inbox search uses.
+    if(!phone){
+      try{
+        const hints=uniqueStrings([deal.title,deal.contactName,deal.contactId].map(v=>String(v||"").trim())).filter(Boolean);
+        for(const hint of hints.slice(0,3)){
+          const found=await searchDealsIndexed(hint,50);reads+=Number(found.reads||0);
+          const exact=found.docs.find(x=>x.id===req.params.id);
+          if(exact){
+            const x=exact.data()||{};
+            phone=String(x.contactPhone||x.phone||"").replace(/\D/g,"");
+            if(phone)break;
+          }
+        }
+      }catch(e){console.warn("hub-link indexed phone fallback",e.message||String(e));}
+    }
     if(phone){
       const variants=[phone,`+${phone}`,`whatsapp:+${phone}`,`whatsapp:${phone}`];
       for(const field of ["waFrom","customerPhone","phone","from","contactPhone"]){

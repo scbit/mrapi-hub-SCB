@@ -453,7 +453,10 @@ function mergeConversationSummaries(items=[]){
     merged.isLinked=merged.contactIds.length>0||merged.dealIds.length>0;
     merged.linkedLineIds=canonicalLines(rows.flatMap(x=>[x.lineId,x.inboundTo,...(x.linkedLineIds||[])]));
     merged.lineCount=Math.max(1,merged.linkedLineIds.length);
-    merged.relatedConversationIds=uniqueStrings(rows.flatMap(x=>[x.id,...(x.relatedConversationIds||[]),...(x.duplicateConversationIds||[])]));
+    // v1.6.3: aliases are ONLY documents that resolve to the same customer + same line.
+    // Never inherit persisted duplicateConversationIds here: older multi-line code wrote
+    // conversations from other WhatsApp lines into that field and mixed histories.
+    merged.relatedConversationIds=uniqueStrings(rows.map(x=>x.id));
     merged.duplicateConversationIds=merged.relatedConversationIds.filter(x=>x!==merged.id);
     merged.conversationKey=readable||primary.conversationKey||"";
     out.push(merged);
@@ -1230,8 +1233,9 @@ router.post("/conversations/:id/lines/link-all",authRequired,async(req,res)=>{
     const id=cleanString(decodeURIComponent(req.params.id||""),220); const selected=await inboxDb.collection("conversations").doc(id).get();
     if(!selected.exists)return res.status(404).json({ok:false,error:"Conversación no encontrada"}); const c=selected.data()||{}; const waFrom=String(c.waFrom||"");
     const snap=await inboxDb.collection("conversations").where("waFrom","==",waFrom).limit(20).get(); const ids=snap.docs.map(d=>d.id); const lines=canonicalLines(snap.docs.map(d=>{const x=d.data()||{};return x.inboundTo||x.lineId||"";}));
-    const batch=inboxDb.batch(); snap.docs.forEach(d=>batch.set(d.ref,{duplicateConversationIds:ids.filter(x=>x!==d.id),linkedLineIds:lines,updatedAt:FieldValue.serverTimestamp()},{merge:true})); await batch.commit();
-    return res.json({ok:true,conversationIds:ids,linkedLineIds:lines,readsEstimate:1+snap.size,writesEstimate:snap.size});
+    // v1.6.3: linking lines means navigation/awareness only. Different lines remain different chats.
+    const batch=inboxDb.batch(); snap.docs.forEach(d=>batch.set(d.ref,{otherLineConversationIds:ids.filter(x=>x!==d.id),linkedLineIds:lines,multiLineDetected:lines.length>1,multiLineCount:Math.max(1,lines.length),updatedAt:FieldValue.serverTimestamp()},{merge:true})); await batch.commit();
+    return res.json({ok:true,conversationIds:ids,linkedLineIds:lines,readsEstimate:1+snap.size,writesEstimate:snap.size,separateChats:true});
   }catch(e){console.error("link all lines",e);return res.status(500).json({ok:false,error:e.message});}
 });
 router.post("/conversations/:id/lines/preferred",authRequired,async(req,res)=>{
@@ -1265,7 +1269,8 @@ router.get("/conversations/:id/line-alert",authRequired,async(req,res)=>{
     // Materialize only the selected conversation. We don't rewrite every historical
     // conversation just to render an alert.
     await ref.set({
-      duplicateConversationIds:isMulti?allIds.filter(x=>x!==id):[],
+      // Different WhatsApp lines are related for navigation, never duplicate chats.
+      otherLineConversationIds:isMulti?allIds.filter(x=>x!==id):[],
       linkedLineIds:lines,
       multiLineDetected:isMulti,
       multiLineCount:Math.max(1,lines.length),
@@ -1321,12 +1326,12 @@ router.get("/conversations/:id/messages",authRequired,async(req,res)=>{
     const resolved=await resolveConversationGroup(id);
     if(!resolved.item) return res.status(404).json({ok:false,error:"Conversación no encontrada"});
 
+    // v1.6.3: history is strictly scoped to the resolved customer + WhatsApp line.
+    // Do not trust old duplicateConversationIds or frontend "related" values because
+    // previous multi-line linking could contain IDs from a different business line.
     const related=uniqueStrings([
       id,
-      ...(resolved.snaps||[]).map(s=>s.id),
-      ...(resolved.item.relatedConversationIds||[]),
-      ...(resolved.item.duplicateConversationIds||[]),
-      ...String(req.query.related||"").split(",")
+      ...(resolved.snaps||[]).map(s=>s.id)
     ]).slice(0,50);
 
     let reads=Number(resolved.reads||0);const all=[];
@@ -1364,8 +1369,11 @@ router.get("/conversations/:id/messages/changes",authRequired,async(req,res)=>{
     const sinceRaw=cleanString(req.query.since,80); const sinceDate=new Date(sinceRaw);
     if(!id) return res.status(400).json({ok:false,error:"Conversación inválida"});
     if(!sinceRaw || Number.isNaN(sinceDate.getTime())) return res.status(400).json({ok:false,error:"Checkpoint inválido"});
-    const related=uniqueStrings([id,...String(req.query.related||"").split(",")]).slice(0,10);
-    let reads=0;const all=[];
+    const resolved=await resolveConversationGroup(id);
+    if(!resolved.item) return res.status(404).json({ok:false,error:"Conversación no encontrada"});
+    // v1.6.3: live polling follows the exact same customer+line boundary as full history.
+    const related=uniqueStrings([id,...(resolved.snaps||[]).map(s=>s.id)]).slice(0,10);
+    let reads=Number(resolved.reads||0);const all=[];
     for(const conversationId of related){
       const snap=await inboxDb.collection("conversations").doc(conversationId).collection("messages")
         .where("timestamp",">=",sinceDate).orderBy("timestamp","asc").limit(100).get();
@@ -1612,7 +1620,7 @@ router.post("/twilio/inbound",async(req,res)=>{
         const lines=canonicalLines(siblings.docs.map(d=>{const x=d.data()||{};return x.inboundTo||x.lineId||"";}));
         if(lines.length>1 && siblings.size>1){
           const batch=inboxDb.batch();
-          siblings.docs.forEach(d=>batch.set(d.ref,{duplicateConversationIds:ids.filter(x=>x!==d.id),linkedLineIds:lines,multiLineDetected:true,multiLineCount:lines.length,multiLineUpdatedAt:FieldValue.serverTimestamp()},{merge:true}));
+          siblings.docs.forEach(d=>batch.set(d.ref,{otherLineConversationIds:ids.filter(x=>x!==d.id),linkedLineIds:lines,multiLineDetected:true,multiLineCount:lines.length,multiLineUpdatedAt:FieldValue.serverTimestamp()},{merge:true}));
           await batch.commit();
         }
       }catch(linkErr){console.warn("multi-line auto-link",linkErr.message)}

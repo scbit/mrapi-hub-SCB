@@ -463,7 +463,7 @@ router.get("/deals/:id/hub-link",async(req,res)=>{
     });
     const selected=rows[0],customer=customerOf(selected),line=lineOf(selected);
     const publicId=customer&&line?`${customer}__${line}`:selected.id;
-    return res.json({ok:true,found:true,conversationId:publicId,url:`/inbox?conversationId=${encodeURIComponent(publicId)}`,readsEstimate:reads,legacyResolved:publicId!==selected.id,selectedInternalId:selected.id,selectedHasMessages:Boolean(selected.__hasMessages||hasSummaryActivity(selected))});
+    return res.json({ok:true,found:true,conversationId:publicId,url:`/inbox?conversationId=${encodeURIComponent(publicId)}&dealId=${encodeURIComponent(req.params.id)}`,readsEstimate:reads,legacyResolved:publicId!==selected.id,selectedInternalId:selected.id,selectedHasMessages:Boolean(selected.__hasMessages||hasSummaryActivity(selected))});
   }catch(e){console.error("hub-link",e);return res.status(500).json({ok:false,found:false,error:e.message});}
 });
 
